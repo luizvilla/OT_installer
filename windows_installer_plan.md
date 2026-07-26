@@ -955,10 +955,167 @@ actually finished once it exits).
 Net effect on the "USB driver" open decision: no driver-install step is needed anywhere in
 `install_owntech.ps1`, now confirmed on real hardware rather than inferred from reading code.
 
+### GUI wizard design — Inno Setup wrapping the hardened script (2026-07-26, proposal)
+
+**Why**: Windows users expect a familiar "Next → Next → Finish" installer, not running a PowerShell
+script — a distribution/UX goal, separate from (and downstream of) the resilience work above. The wizard
+doesn't reimplement `install_owntech.ps1`'s logic; it's a thin GUI wrapper that calls it. Inno Setup
+remains the recommended tool (free, scriptable `[Code]` section in Pascal Script, supports custom wizard
+pages, can shell out via `Exec`) — this was the leading candidate from the earlier "full downloadable
+local installer" investigation, before that thread concluded a wizard wasn't *needed* to fix Phase 5
+speed. It's being picked up again now for the distribution reason, not that one.
+
+**Four screens**, matching the request:
+1. **Welcome** — standard Inno Setup default page, branded.
+2. **Choose install folder** — custom page (directory picker), with the same validation rules as
+   `Test-ProjectPath` (no spaces, under 256 characters, not under OneDrive) applied live as the user
+   types or browses, instead of today's post-hoc console error.
+3. **Progress checklist** — see below.
+4. **Completion** — standard finish page, showing the same "remaining manual steps" text Phase 6 already
+   prints (connect the board, Build, Upload).
+
+**Multi-bar progress design.** One bar (or checklist row) per component, not one bar for the whole
+install — seeing several short steps complete in sequence reads as faster than one bar stalled for
+minutes, even at the same total wall-clock time. Critically, this applies *inside* Phase 5 too, not just
+across phases: Phase 5 alone was 5m33s of the 8m08s real-world total measured earlier (68%) — exactly the
+"single bar stalled over 8+ minutes" problem — so it should be broken into its own sub-steps rather than
+shown as one bar. Proposed checklist:
+
+1. Git
+2. Python
+3. CMake
+4. VS Code
+5. Extensions (PlatformIO IDE, Markdown Preview Enhanced, Git Graph)
+6. Clone OwnTech Core
+7. Fetch PlatformIO package bundle
+8. Bootstrap PlatformIO Core
+9. Build firmware (smoke test)
+
+Execution stays sequential under the hood — this is a presentation change over already-sequential,
+already-tested work, not a concurrency change. Actually parallelizing (e.g. installing Git and CMake at
+the same time) is a bigger, untested change (winget concurrency hasn't been tried, and Phase 5's steps
+have real dependencies on each other) and isn't recommended for a first version.
+
+**Implementation mechanism.** Inno Setup's own progress bar reflects overall `[Run]`/`[Files]` progress as
+a single bar — genuinely separate per-row bars need a custom wizard page with its own progress controls,
+driven from Pascal Script. Since `install_owntech.ps1` currently runs as one continuous process, Pascal
+Script has no visibility into *where* it is inside a single blocking `Exec` call. Two options:
+- **(A) Split the script into per-phase invocations** the wizard calls one at a time (e.g. a `-RunPhase
+  <name>` parameter, with state like the resolved project path passed through each call or read back from
+  a small state file), marking each checklist row complete based on that call's exit code before moving to
+  the next. Standard, robust pattern for this kind of wizard.
+- **(B) Stream progress markers from one continuous process** (e.g. `##PHASE:git:DONE##` lines) that
+  Pascal Script tails from a log file or a redirected pipe. More fragile in Inno Setup, which doesn't have
+  first-class support for reading a running subprocess's output incrementally.
+
+**(A) is the recommendation** — it's more robust, and this is real work beyond wrapping the script as-is:
+it requires a script-side refactor, not just a wizard-side one. Worth sizing that honestly before starting
+wizard work, not treating it as a detail to figure out later.
+
+**Error handling — fatal vs. recoverable, mapped to what the script actually does today** (not aspirational — checked against the code directly):
+
+| Step | Recoverable today? | On exhausted failure |
+|---|---|---|
+| Git / Python / CMake / VS Code (`Install-WingetApp`) | **No retry** — single winget attempt | Fatal (`Stop-Install`) |
+| PlatformIO IDE extension | No retry | Fatal (required) |
+| Markdown Preview / Git Graph extensions | No retry | Warning only, continues (not required) |
+| Clone OwnTech Core | Retry w/ backoff (3×, 2s/4s) + auto-heals an incomplete/corrupt clone | Fatal |
+| Fetch package bundle + 7za | Retry w/ backoff | Falls back gracefully (skips bundle, live-downloads during build) — **not fatal** |
+| Bootstrap PlatformIO Core | `get-platformio.py` *download* has retry; actually *running* it does not | Fatal |
+| Build firmware | No retry — single `pio run` attempt | Fatal (shows last 25 log lines) |
+| Preflight (Windows version, winget, disk space, path) | N/A — these are validation, not network calls | Fatal |
+
+**A real gap this surfaced**: only the four network-download call sites (bundle, `get-platformio.py`, 7za,
+`git clone`) got retry-with-backoff in today's hardening — the four `winget`-based installs (Git, Python,
+CMake, VS Code) did not, despite being just as exposed to a transient network blip. Worth closing before
+or alongside wizard work, since a wizard surfacing a "Git install failed" fatal dialog on a blip that a
+retry would have silently absorbed undercuts the whole resilience story. Not fixed as part of this
+documentation pass — flagged here as a concrete follow-up.
+
+For fatal errors, the wizard can reuse `Stop-Install`'s existing `$Reason`/`$Remediation` strings verbatim
+in its error dialog — they're already written to be specific and user-facing, no new copy needed.
+
+**Open questions this design surfaces, not yet decided:**
+- **Elevation.** The plain script deliberately avoids requiring admin rights (a real, confirmed constraint
+  on this project's dev machine). Inno Setup installers conventionally request elevation; this one
+  shouldn't by default, to preserve that same audience. The one place elevation would add real value is
+  finally wiring in the Defender-exclusion opt-in switch (proposed but never implemented — see "Immediate
+  next step" above) as an optional, explicitly-consented step, not something the wizard grabs by default.
+- **Additional preflight checks worth considering, not yet added anywhere**: free RAM (compiling Zephyr is
+  somewhat memory-hungry; no OOM failure has actually been observed in any test this project, so this
+  would be speculative, not evidence-based, if added now), and ARM64 Windows (never tested on this
+  architecture at all, unknown status).
+- Whether the wizard becomes the *only* distributed form, or sits alongside the plain script for users who
+  prefer it (e.g. CI, or advanced users) — not decided.
+
+```mermaid
+flowchart TD
+    classDef screen fill:#4a7ebb,color:#fff,stroke:#2c4e73
+    classDef fatal fill:#d9534f,color:#fff,stroke:#8b2e2b
+    classDef recoverable fill:#f0ad4e,color:#000,stroke:#8a6215
+    classDef check fill:#eeeeee,color:#000,stroke:#999999
+
+    Start(["User double-clicks the installer"]) --> Welcome[/"Screen 1: Welcome"/]:::screen
+    Welcome --> Preflight{"Windows version OK?\nwinget available?"}:::check
+    Preflight -- "Windows too old" --> F_OS["FATAL: unsupported\nWindows version"]:::fatal
+    Preflight -- "winget missing" --> F_Winget["FATAL: install App Installer\nfrom Microsoft Store"]:::fatal
+    Preflight -- OK --> PathScreen[/"Screen 2: choose install folder"/]:::screen
+
+    PathScreen --> PathCheck{"Path OK?\nno space / under 256 chars / not OneDrive"}:::check
+    PathCheck -- invalid --> PathScreen
+    PathCheck -- valid --> DiskCheck{"Free space OK?\n>= 5GB on target drive"}:::check
+    DiskCheck -- no --> F_Disk["FATAL: free up disk space"]:::fatal
+    DiskCheck -- yes --> Redirect{"System drive < 8GB free,\nor username has a space?"}:::check
+    Redirect -- yes --> RedirNote["Silently redirect PlatformIO\ncore dir to install drive"]:::recoverable
+    Redirect -- no --> ProgressScreen[/"Screen 3: progress checklist"/]:::screen
+    RedirNote --> ProgressScreen
+
+    ProgressScreen --> S1["1. Git\n(no retry -- single attempt)"]
+    S1 -- fails --> F_Git["FATAL: Git install failed"]:::fatal
+    S1 -- ok --> S2["2. Python\n(no retry)"]
+    S2 -- fails --> F_Py["FATAL: Python install failed"]:::fatal
+    S2 -- ok --> S3["3. CMake\n(no retry)"]
+    S3 -- fails --> F_CMake["FATAL: CMake install failed"]:::fatal
+    S3 -- ok --> S4["4. VS Code\n(no retry)"]
+    S4 -- fails --> F_VSC["FATAL: VS Code install failed"]:::fatal
+    S4 -- ok --> S5["5. Extensions:\nPlatformIO (required), Markdown\nPreview + Git Graph (optional)"]
+    S5 -- "PlatformIO ext fails" --> F_Ext["FATAL"]:::fatal
+    S5 -- "optional ext fails" --> WarnExt["non-blocking warning,\ncontinue"]:::recoverable
+    WarnExt --> S6
+    S5 -- ok --> S6["6. Clone OwnTech Core\n(retry + auto-heal)"]
+    S6 -- "incomplete/corrupt clone found" --> Heal["auto-heal: remove + re-clone"]:::recoverable
+    Heal --> S6
+    S6 -- "network blip" --> R6["auto-retry, 2s/4s backoff"]:::recoverable
+    R6 -- recovered --> S6
+    R6 -- "3 attempts exhausted" --> F_Clone["FATAL: clone failed"]:::fatal
+    S6 -- ok --> S7["7. Fetch package bundle + 7za\n(retry, then graceful skip)"]
+    S7 -- "network blip" --> R7["auto-retry"]:::recoverable
+    R7 -- recovered --> S7
+    R7 -- exhausted --> Skip7["skip bundle -- fall back to\nlive download during build"]:::recoverable
+    Skip7 --> S8
+    S7 -- ok --> S8["8. Bootstrap PlatformIO Core\n(get-platformio.py download\nhas retry; running it does not)"]
+    S8 -- "download blip" --> R8["auto-retry"]:::recoverable
+    R8 -- recovered --> S8
+    R8 -- exhausted --> F_Boot["FATAL: bootstrap failed"]:::fatal
+    S8 -- "script itself fails" --> F_Boot
+    S8 -- ok --> S9["9. Build firmware\n(no retry -- single attempt)"]
+    S9 -- fails --> F_Build["FATAL: build failed\n(show last 25 log lines)"]:::fatal
+    S9 -- ok --> Done[/"Screen 4: completion +\nremaining manual steps"/]:::screen
+    Done --> End(["Wizard closes"])
+```
+
+Not yet implemented — this is a design document, produced before any wizard code exists. The script-side
+refactor for option (A) above and the retry-coverage gap on the four `winget` installs are both real
+prerequisites worth doing first, per this doc's established measure/harden-before-building pattern.
+
 ## Open decisions
 
-- Distribution: plain script users download and run, vs. a signed `.exe` wrapper — defer until the
-  script itself is proven reliable.
+- ~~Distribution: plain script vs. a signed `.exe` wrapper — defer until the script itself is proven
+  reliable.~~ — the script is now well-evidenced as reliable (see the hardening and real-world-cycle work
+  above); a full wizard design proposal exists (see "GUI wizard design" above) but is not yet built. Two
+  concrete prerequisites identified there, worth doing first: a script-side refactor for per-phase
+  invocation (needed for the multi-bar progress UI), and extending retry-with-backoff to the four
+  `winget`-based installs (currently single-attempt, unlike the four network-download call sites).
 - ~~Whether Windows needs a USB driver for the SPIN board...~~ — answered, 2026-07-26: no. See "SPIN board
   USB/upload path verified on real hardware" near the end of this doc.
 - Whether the installer replaces Steps 1–6 in `environment_setup.md` outright, or the docs keep the
