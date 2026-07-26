@@ -1143,8 +1143,9 @@ flowchart TD
 
 Not yet implemented — this is a design document, produced before any wizard code exists. The retry-coverage
 gap on the four `winget` installs is now closed (see "winget retry-with-backoff closed the coverage gap"
-below); the script-side refactor for option (A) above is not — see the concrete step-by-step plan for it
-immediately below.
+below); the script-side refactor for option (A) above is now also done — see "Per-phase refactor
+implemented" further down — and a concrete 6-step plan for the actual wizard code itself exists in
+"Wizard build plan" near the end of this doc.
 
 #### Per-phase refactor implementation plan (2026-07-26, proposal)
 
@@ -1264,16 +1265,104 @@ boundaries — proven, not assumed. This is now genuinely ready for a wizard's `
 
 **Not done**: the actual Inno Setup wizard itself — this refactor only builds what it needs to stand on.
 
+### Wizard build plan (2026-07-26, proposal)
+
+Concrete implementation plan for the actual Inno Setup wizard described in "GUI wizard design" above, now
+that its prerequisite (the per-phase refactor, immediately above) is done and verified. Same style as the
+per-phase refactor plan: independently-committable steps, each leaving a working, testable artifact.
+
+**Two design refinements since the original wizard design doc**, both worth stating explicitly before
+writing code so they're a deliberate choice, not a surprise found mid-implementation:
+
+- **Path validation is validate-on-Next, not live-as-you-type.** The original design said validation
+  happens "live as the user types or browses." In practice, the only correctness-preserving way to do that
+  without maintaining two copies of the validation logic (one in `Test-ProjectPath`, one reimplemented in
+  Pascal Script, which can drift apart) is to actually invoke `-RunPhase preflight` and surface *its*
+  result — and that's a real process spawn (disk space check, folder creation, component detection), not
+  something to fire on every keystroke. So: validate when the user clicks Next on the path page, not
+  continuously. Still a real improvement over today's console experience (immediate, specific, in the
+  wizard's own UI) — just not literally live.
+- **Progress bars are per-row completion state (pending/running/done/failed), not true 0–100% progress
+  within a step.** None of the phases expose a granular percentage signal — `pio run`'s own output isn't
+  structured for that, and parsing it live to fake a percentage is fragile and out of scope for v1. Each
+  row's bar is really a status indicator (and optionally an indeterminate/marquee animation while
+  `Exec` is blocked waiting), not a meter of how far through that specific step things are. Still delivers
+  the actual goal — seeing steps complete in sequence reads as faster than one bar stalled for minutes —
+  just via row completion, not intra-row percentage.
+
+**Steps, each its own commit:**
+
+1. **Scaffold: Welcome + Completion pages only, no install logic.** A minimal `.iss` file
+   (`[Setup]` with `PrivilegesRequired=lowest` — preserving the non-admin-by-default constraint the whole
+   project has been built around — `[Files]`/`[Run]` sections not yet doing anything real) that compiles
+   and runs, to validate the toolchain itself (Inno Setup Compiler, installed via `winget install
+   innosetup.innosetup` on the build machine only — end users only ever run the compiled `.exe`) before
+   adding real complexity on top of it.
+   *Verification*: compiles without error, runs, shows Welcome → Completion with no crashes.
+   *Commit*: "Add Inno Setup scaffold: Welcome + Completion pages only, no install logic yet."
+
+2. **Embed `install_owntech.ps1` and add the path-selection page.** A specific, pinned copy of the script
+   is bundled into the build (`[Files]`, `Flags: dontcopy`, extracted to `{tmp}` at runtime) — pinned
+   rather than fetched live from `OT_installer`'s `main` branch at wizard-runtime, so a given wizard build
+   is reproducible and doesn't silently change behavior if the script is updated later; rebuilding and
+   republishing the wizard is the intended way to pick up script changes, same as any versioned release.
+   Custom path page (`CreateInputDirPage`) with `NextButtonClick` calling `-RunPhase preflight
+   -ProjectPath <chosen> -NonInteractive` via `Exec`, blocking advancement and showing `Stop-Install`'s own
+   `$Reason`/`$Remediation` text (captured from the process's output) on failure — reusing the script's
+   existing, already-specific error copy rather than writing new wizard-side messages.
+   *Verification*: try a bad path (space, OneDrive) in the actual wizard UI and confirm it blocks with the
+   right message; try a good path and confirm it advances.
+   *Commit*: "Add path selection page, validated via -RunPhase preflight."
+
+3. **Add the progress checklist page UI, static (not wired to real phases yet).** One row per visible
+   phase — `git`, `python`, `cmake`, `vscode`, `extensions`, `clone`, `bundle`, `bootstrap`, `build` (9
+   rows; `preflight` already ran on the previous page, `summary` becomes the Completion page's content) —
+   each a label + status indicator, laid out on a `CreateCustomPage` page. Getting the layout right in
+   isolation before wiring it to real, slower process calls keeps this step fast to iterate on.
+   *Verification*: visual check only — page renders with all 9 rows, no logic yet.
+   *Commit*: "Add progress checklist page UI (static, not yet wired to real phases)."
+
+4. **Wire the checklist to actually run phases sequentially via `-RunPhase`.** On entering the progress
+   page, loop through the 9 phases in order, calling `Exec powershell.exe -File <extracted script>
+   -RunPhase <name> -ProjectPath <chosen> -NonInteractive` for each, updating that row's status
+   (running → done/failed) as each call returns, matching the fatal-vs-recoverable map from "GUI wizard
+   design" above: a fatal phase failure shows the captured `Stop-Install` text in a Retry/Cancel dialog
+   (Retry re-invokes just that one phase — cheap, since each phase is independently invocable by design);
+   phases that degrade gracefully on their own (the optional VS Code extensions, the bundle-fetch
+   fallback) shouldn't trigger this dialog at all, just a status note, since the underlying script already
+   handles them as non-fatal.
+   *Verification*: a full real run through the wizard end to end on this machine, comparing total time
+   against the 8m13s/8m08s plain-script baselines — the wizard adds `Exec`/process-spawn overhead per
+   phase (11 separate process starts instead of 1), worth knowing whether that overhead is negligible or
+   not before calling this done.
+   *Commit*: "Wire progress checklist to run phases via -RunPhase, updating status per row."
+
+5. **Deliberately exercise the retry path**: force a phase to fail (e.g. temporarily rename `winget.exe`,
+   mirroring the fake-shim technique from `test_hardening.ps1` Group 3, or disconnect network mid-`bundle`)
+   and confirm the wizard's Retry button actually re-runs just that phase and continues correctly on
+   success, rather than restarting the whole sequence or leaving the UI in a stuck state.
+   *Commit*: none expected; a fixup commit only if the retry path itself has a bug.
+
+6. **Package and decide hosting** for the compiled `.exe` — likely a GitHub Release on `OT_installer`,
+   mirroring exactly how the PlatformIO bundle is already published and verified there. Whether to
+   code-sign it (avoiding a Windows SmartScreen warning on first run) is a real open question, not decided
+   here — see Open decisions below.
+
+**Not included in this plan**: automating the build/publish step (a `build_wizard.ps1` analogous to
+`build_platformio_bundle.ps1`, if that ends up being wanted) — worth doing once the wizard itself is
+proven, not before, matching this project's own established pattern of proving something manually first.
+
 ## Open decisions
 
 - ~~Distribution: plain script vs. a signed `.exe` wrapper — defer until the script itself is proven
   reliable.~~ — the script is now well-evidenced as reliable (see the hardening and real-world-cycle work
-  above); a full wizard design proposal exists (see "GUI wizard design" above) but is not yet built. Both
-  prerequisites identified there are now done: ~~extending retry-with-backoff to the four `winget`-based
-  installs~~ (see "winget retry-with-backoff closed the coverage gap") and ~~the script-side per-phase
-  refactor needed for the multi-bar progress UI~~ (see "Per-phase refactor implemented" — all 6 steps,
-  `-RunPhase`/`-ListPhases` working and verified against a real reset+reinstall cycle). What's left is the
-  actual Inno Setup wizard code itself, not yet started.
+  above); both prerequisites for the wizard are done (winget retry-with-backoff, the per-phase refactor),
+  and a concrete 6-step build plan exists (see "Wizard build plan" above). Not yet started.
+- Whether to code-sign the compiled wizard `.exe` — an unsigned installer triggers a Windows SmartScreen
+  "unknown publisher" warning on first run, which cuts against the whole point of a wizard being the more
+  approachable, official-feeling option. Requires a code-signing certificate (a real cost/process, not
+  free like everything else this project has used so far) — worth deciding once the wizard itself works,
+  not before.
 - ~~Whether Windows needs a USB driver for the SPIN board...~~ — answered, 2026-07-26: no. See "SPIN board
   USB/upload path verified on real hardware" near the end of this doc.
 - Whether the installer replaces Steps 1–6 in `environment_setup.md` outright, or the docs keep the
