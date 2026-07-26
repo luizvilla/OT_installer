@@ -1400,11 +1400,81 @@ killed via a safety timeout. `Abort` is Inno Setup's standard, documented API fo
 the change itself is small and low-risk, but this specific path genuinely needs a real interactive run to
 fully confirm.
 
-**Recommended next action, not yet done**: run `wizard\dist\OwnTechInstaller.exe` interactively, once,
-covering at minimum: the Welcome page, entering a bad path (confirm the error dialog reads correctly and
-blocks advancing), entering a good path, watching the progress checklist actually update through all 9
-rows, and reaching the Completion page. This is the one verification step in the whole build that
-genuinely requires a human at the keyboard.
+~~**Recommended next action, not yet done**: run `wizard\dist\OwnTechInstaller.exe` interactively...~~ —
+done, see "First real dry run" immediately below. It found real bugs the automated testing above couldn't
+have caught, exactly as expected from something needing a human at the keyboard.
+
+### First real dry run (2026-07-26/27) — three more real bugs found and fixed
+
+The user ran `wizard\dist\OwnTechInstaller.exe` interactively for the first time and reported three things.
+Two were feature requests (now implemented); investigating the third surfaced two more real, unrelated
+bugs beyond what it was asked about.
+
+**1. Overwrite confirmation, requested and implemented.** Accidentally choosing an already-used folder had
+no warning. Added: if the chosen folder exists and is non-empty, confirm before continuing — with the
+message tailored to what actually happens (checked for `.git` specifically): "already has an OwnTech
+project, will reuse it" if so, or a note that Setup won't delete anything but will nest into a `Core`
+subfolder if not. Deliberately not framed as "overwrite," since `install_owntech.ps1` never actually
+overwrites unrelated content — the message says what's true, not what's alarming.
+
+**2. Real progress bars, requested and implemented.** The checklist previously showed only status text.
+Added an actual `TNewProgressBar` per row (pending/running-marquee/done/failed), on top of keeping the
+text label. Still can't show true percentage within a step (no phase exposes one) or animate smoothly
+while a step's blocking `Exec` call is running — both already-documented, unavoidable constraints — but
+each state transition now renders as a real bar, not just changed text.
+
+**3. "How do I reset for a clean timing run?"** — answered directly (see below); not a bug.
+
+**Investigating dialog behavior along the way surfaced two more real, unrelated bugs**, found by actually
+forcing failures and reading the resulting logs rather than assuming the earlier automated checks were
+complete:
+
+- **`PLATFORMIO_CORE_DIR` wasn't propagating to fresh `-RunPhase` processes.** `Get-CoreDirForPhase`
+  correctly *read* `CoreDir` from the persisted state, but never *set* `$env:PLATFORMIO_CORE_DIR` in the
+  current process before spawning `python`/`pio` — those tools read that variable from their own process
+  environment themselves, not a value this script computed. This worked in the old single-continuous-
+  process model (a direct child inherits its parent's live environment) and broke once `-RunPhase` made
+  each phase a genuinely separate process. Found running the real compiled wizard against a fresh
+  `C:\owntech`: bootstrap reported success (exit 0) but `penv` never appeared at the redirected core dir.
+  This is exactly the class of bug step 6's own test (Group 4 in `test_hardening.ps1`) couldn't have
+  caught — that test runs against an *already-configured* `D:\owntech`, where bootstrap's `if (Test-Path
+  $pioExe) { skip }` short-circuits before ever reaching this code path. Fixed by setting the env var as a
+  side effect of `Get-CoreDirForPhase` itself, so every caller gets it automatically.
+- **`Update-SessionPath` only ran in `preflight`.** A later phase needing a tool an *earlier* phase (in
+  some earlier, separate process) had just installed could see a stale PATH. Now called for every
+  `-RunPhase` invocation.
+- **`Abort` — the fix from the previous session's testing — turned out not to work either.** Neither it
+  nor `WizardForm.Close` actually stops Setup when called from `CurPageChanged`, because that's a passive
+  notification callback with no return value Setup inspects — an exception raised inside it doesn't
+  propagate the way it does from a real flow-control event. Confirmed by deliberately forcing a build
+  failure through to completion: exit code 0 and "Installation process succeeded" both times despite
+  Cancel being chosen, exactly like the original `WizardForm.Close` bug. **Redesigned**: `RunAllPhases` is
+  now a `Boolean` function invoked from `NextButtonClick` when leaving the progress page — the same
+  well-established mechanism the path page already uses to block advancement — with `CurPageChanged`
+  reduced to simulating a Next click on first arrival (`WizardForm.NextButton.OnClick(...)`) so it still
+  auto-starts. Confirmed fixed: the same forced-failure scenario now logs `"Failed to proceed to next
+  wizard page; aborting. Got EAbort exception."` and exits 1, not 0.
+
+**Final verification**: a fully clean, uninterrupted run from an empty `C:\owntech` through to a real
+`firmware.elf` — **~11 minutes, zero retry dialogs needed** (every phase succeeded on its first attempt).
+This is longer than the 8m08s/8m13s bundle-backed baselines elsewhere in this doc because the wizard
+doesn't pass `-BundleUrl` yet (a known, already-tracked gap, not new) — it matches the original no-bundle
+baseline instead. Also confirmed along the way: two earlier test attempts failed with a real build error
+that turned out to be an artifact of forcibly killing a mid-download process during testing (an incomplete
+package left in a bad state), not a genuine bug — running the same build again cleanly afterward succeeded
+immediately.
+
+**How to reset for your own clean timing run** (the user's third question): `reset_environment.ps1`
+handles this — it's the same tool this whole project's own timed-cycle measurements have used throughout.
+From the `installer` folder:
+```powershell
+.\reset_environment.ps1 -ProjectPath C:\owntech -NonInteractive
+```
+This uninstalls Git/CMake/VS Code (CMake's uninstall is expected to fail with exit 1603 on a non-admin
+account — a known, harmless, already-documented pattern, not a bug) and deletes the project folder, the
+PlatformIO core dir, and related config. One thing worth knowing before running it yourself: it also
+deletes `.gitconfig`, which will require re-running `git config --global user.name/user.email` afterward if
+you do any git work on this machine post-reset (a gotcha this project's own sessions have hit repeatedly).
 
 ## Open decisions
 
