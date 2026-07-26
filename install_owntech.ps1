@@ -175,8 +175,21 @@ function Install-WingetApp($Id, $DisplayName, $VerifyCommand, $VerifyScriptBlock
     }
 
     Write-Info "Installing $DisplayName ($Id) via winget..."
-    winget install --id $Id -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
-    $exitCode = $LASTEXITCODE
+    $script:lastWingetExitCode = 0
+    $wingetSucceeded = $true
+    try {
+        Invoke-WithRetry -Description "$DisplayName install (winget)" -Action {
+            winget install --id $Id -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+            $script:lastWingetExitCode = $LASTEXITCODE
+            if ($script:lastWingetExitCode -ne 0) {
+                throw "winget exited with code $($script:lastWingetExitCode)"
+            }
+        }
+    } catch {
+        # Retries exhausted -- fall through to the checks below for a
+        # specific, actionable error rather than the retry's own message.
+        $wingetSucceeded = $false
+    }
 
     Update-SessionPath
 
@@ -185,8 +198,8 @@ function Install-WingetApp($Id, $DisplayName, $VerifyCommand, $VerifyScriptBlock
         return
     }
 
-    if ($exitCode -ne 0) {
-        Stop-Install "$DisplayName install failed (winget exit code $exitCode)." `
+    if (-not $wingetSucceeded) {
+        Stop-Install "$DisplayName install failed (winget exit code $script:lastWingetExitCode) after retries." `
             "Try running 'winget install --id $Id -e' manually to see the full error, or install $DisplayName from its official site."
     }
 

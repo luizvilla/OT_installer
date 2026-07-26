@@ -8,6 +8,10 @@ Automated test suite for the Phase 3/4/5 hardening work (see windows_installer_p
   2. Simulated network-outage tests against Invoke-BundleSeed: a local HTTP server is
      killed and (for the "recovered" case) restarted on a timer, to exercise the
      Invoke-WithRetry path without needing a real network to misbehave on command.
+  3. winget retry tests against Install-WingetApp: a fake winget.cmd placed ahead of
+     the real one on PATH, controllable to fail a set number of times before
+     succeeding, since real winget can't be pointed at a controllable local stand-in
+     the way HTTP downloads can.
 
 Usage:
     .\test_hardening.ps1
@@ -174,6 +178,121 @@ if ($mainIdx -lt 0) {
 
     Remove-Item $coreDirB -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $serveDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ----------------------------------------------------------------------------
+# Group 3: winget retry-with-backoff (Install-WingetApp)
+# ----------------------------------------------------------------------------
+Write-Host ""
+Write-Host "== Group 3: winget install retry ==" -ForegroundColor Cyan
+
+if ($mainIdx -lt 0) {
+    Record-Result 'winget retry tests' $false "Functions were not isolated (see Group 2 failure above) -- skipping this group."
+} else {
+    # A fake winget.cmd, placed ahead of the real winget on PATH for this
+    # process only, so retry behavior can be tested without needing a real
+    # network to misbehave on command and without touching real software.
+    # Controlled via env vars read by the .cmd itself: FAKE_WINGET_FAIL_UNTIL
+    # (fail on attempts before this number, succeed from then on) and
+    # FAKE_WINGET_COUNTER_FILE / FAKE_WINGET_MARKER_FILE (per-test state,
+    # since each invocation is a separate process with no shared memory).
+    $fakeWingetDir = Join-Path $env:TEMP 'test_hardening_fake_winget'
+    New-Item -ItemType Directory -Path $fakeWingetDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $fakeWingetCmd = Join-Path $fakeWingetDir 'winget.cmd'
+    @'
+@echo off
+setlocal enabledelayedexpansion
+set /a attempt=0
+if exist "%FAKE_WINGET_COUNTER_FILE%" (
+    set /p attempt=<"%FAKE_WINGET_COUNTER_FILE%"
+)
+set /a attempt+=1
+echo %attempt% > "%FAKE_WINGET_COUNTER_FILE%"
+
+if %attempt% LSS %FAKE_WINGET_FAIL_UNTIL% (
+    echo FAKE WINGET: simulated failure on attempt %attempt%
+    exit /b 1
+) else (
+    echo FAKE WINGET: simulated success on attempt %attempt%
+    echo installed> "%FAKE_WINGET_MARKER_FILE%"
+    exit /b 0
+)
+'@ | Set-Content -Path $fakeWingetCmd -Encoding ascii
+
+    $originalPath = $env:Path
+
+    # --- Test C: transient winget failure, recovered by retry ---
+    $counterFileC = Join-Path $env:TEMP 'test_hardening_winget_counter_c.txt'
+    $markerFileC = Join-Path $env:TEMP 'test_hardening_winget_marker_c.txt'
+    Remove-Item $counterFileC, $markerFileC -Force -ErrorAction SilentlyContinue
+    $env:Path = "$fakeWingetDir;$originalPath"
+    $env:FAKE_WINGET_FAIL_UNTIL = '2'   # fails attempt 1, succeeds attempt 2
+    $env:FAKE_WINGET_COUNTER_FILE = $counterFileC
+    $env:FAKE_WINGET_MARKER_FILE = $markerFileC
+
+    $t0 = Get-Date
+    $threwC = $false
+    try {
+        Install-WingetApp -Id 'Fake.RecoversOnRetry' -DisplayName 'FakeAppRecover' -VerifyCommand 'fakecmd' `
+            -VerifyScriptBlock { Test-Path $env:FAKE_WINGET_MARKER_FILE }.GetNewClosure()
+    } catch {
+        $threwC = $true
+    }
+    $elapsedC = ((Get-Date) - $t0).TotalSeconds
+    $attemptsC = if (Test-Path $counterFileC) { [int](Get-Content $counterFileC -Raw).Trim() } else { 0 }
+    $env:Path = $originalPath
+
+    # Success signal: didn't throw/exit, the fake winget's marker file exists
+    # (meaning it actually reported success), and it took exactly 2 attempts
+    # (not 1 -- proving the retry, not a lucky first try; not 3 -- proving it
+    # stopped retrying once recovered).
+    $passedC = (-not $threwC) -and (Test-Path $markerFileC) -and ($attemptsC -eq 2)
+    Record-Result 'winget transient failure recovered by retry' $passedC "threw=$threwC, marker-exists=$(Test-Path $markerFileC), attempts=$attemptsC, elapsed=$([math]::Round($elapsedC,1))s"
+
+    # --- Test D: sustained winget failure, retries exhausted, fails safely ---
+    # Install-WingetApp calls Stop-Install (exit 1) once retries are exhausted
+    # and verification still fails -- exactly like the bad-path tests in
+    # Group 1, this must run as a real child process so that exit doesn't
+    # kill this test runner too.
+    $counterFileD = Join-Path $env:TEMP 'test_hardening_winget_counter_d.txt'
+    $markerFileD = Join-Path $env:TEMP 'test_hardening_winget_marker_d.txt'
+    Remove-Item $counterFileD, $markerFileD -Force -ErrorAction SilentlyContinue
+
+    $childScript = Join-Path $env:TEMP 'test_hardening_winget_child.ps1'
+    @"
+. '$funcOnlyPath'
+`$ErrorActionPreference = 'Continue'
+Install-WingetApp -Id 'Fake.AlwaysFails' -DisplayName 'FakeAppFail' -VerifyCommand 'fakecmd' ``
+    -VerifyScriptBlock { Test-Path `$env:FAKE_WINGET_MARKER_FILE }
+"@ | Set-Content -Path $childScript -Encoding utf8
+
+    $t0 = Get-Date
+    $env:Path = "$fakeWingetDir;$originalPath"
+    $env:FAKE_WINGET_FAIL_UNTIL = '999'   # never succeeds
+    $env:FAKE_WINGET_COUNTER_FILE = $counterFileD
+    $env:FAKE_WINGET_MARKER_FILE = $markerFileD
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $childScript 2>&1 | Out-String
+    $childExit = $LASTEXITCODE
+    $elapsedD = ((Get-Date) - $t0).TotalSeconds
+    $env:Path = $originalPath
+
+    $attemptsD = if (Test-Path $counterFileD) { [int](Get-Content $counterFileD -Raw).Trim() } else { 0 }
+    $reasonMatchedD = $out -match 'install failed \(winget exit code 1\) after retries'
+    $retriesHappenedD = $elapsedD -ge 5
+    $passedD = ($childExit -eq 1) -and ($attemptsD -eq 3) -and $reasonMatchedD -and $retriesHappenedD
+    Record-Result 'winget sustained failure exhausts retries and fails safely' $passedD `
+        "exit=$childExit (want 1), attempts=$attemptsD (want 3), reason-matched=$reasonMatchedD, retries-happened=$retriesHappenedD, elapsed=$([math]::Round($elapsedD,1))s"
+    if (-not $passedD) {
+        Write-Host "  --- tail of output ---" -ForegroundColor Yellow
+        Write-Host ($out -split "`n" | Select-Object -Last 15 | Out-String)
+    }
+
+    Remove-Item $counterFileC, $markerFileC, $counterFileD, $markerFileD, $childScript -Force -ErrorAction SilentlyContinue
+    Remove-Item $fakeWingetDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:\FAKE_WINGET_FAIL_UNTIL, Env:\FAKE_WINGET_COUNTER_FILE, Env:\FAKE_WINGET_MARKER_FILE -ErrorAction SilentlyContinue
+}
+
+if ($mainIdx -ge 0) {
     Remove-Item $funcOnlyPath -Force -ErrorAction SilentlyContinue
 }
 

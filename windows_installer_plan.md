@@ -900,6 +900,34 @@ any time; it only touches isolated temp directories (`Test-ProjectPath` failures
 touch disk, and the network tests use throwaway `CoreDir`s under `$env:TEMP`), never `D:\owntech` or
 `D:\.platformio_core`.
 
+#### winget retry-with-backoff closed the coverage gap (2026-07-26)
+
+Closed the gap flagged in the wizard design doc above: `Install-WingetApp` (Git, Python, CMake, VS Code)
+now wraps its `winget install` call in `Invoke-WithRetry`, same 3-attempts/2s-4s-backoff pattern as the
+other four network call sites. The two distinct failure messages the function already had are preserved
+— "winget itself failed after retries" vs. "winget reported success but the tool still isn't on PATH" —
+since they point at genuinely different remediations (retry/check-connection vs. reopen-terminal/check-
+app-execution-aliases), and collapsing them into one generic retry-failure message would have lost that.
+
+**Testing this needed a different technique than the other retries**: real `winget` talks to Microsoft's
+own servers, which can't be pointed at a controllable local stand-in the way the HTTP downloads were (no
+"local winget server" to kill on command). Instead, `test_hardening.ps1`'s new Group 3 places a fake
+`winget.cmd` ahead of the real one on `PATH` for the test process only — a batch file that tracks its own
+invocation count in a file (since each call is a separate process with no shared memory) and fails until a
+configurable attempt number, then succeeds. Combined with `Install-WingetApp`'s existing
+`-VerifyScriptBlock` parameter (already a test seam, not added for this) to control the "is it actually
+installed" signal independently of winget's own exit code:
+
+| Test | Result |
+|---|---|
+| Transient winget failure, recovered on attempt 2 | PASS (no throw, success marker present, exactly 2 attempts — not 1, proving the retry ran; not 3, proving it stopped once recovered) |
+| Sustained winget failure, all 3 attempts exhausted | PASS (exit 1, correct error message, exactly 3 attempts, ≥5s elapsed confirming backoff actually ran) |
+
+The sustained-failure case runs as a real child process (same reasoning as the bad-path tests: `Stop-Install`
+calls `exit 1` on the whole process by design, so it can't be tested by dot-sourcing into the test runner's
+own session without killing it after the first case). All 7 tests in the suite now pass (5 from before,
+plus these 2) on a clean run. No corrections were needed here either.
+
 #### Windows 10 testing — deprioritized (2026-07-26)
 
 No Windows 10 machine is available to the maintainer, and options to get one (Microsoft's free
@@ -1016,7 +1044,7 @@ wizard work, not treating it as a detail to figure out later.
 
 | Step | Recoverable today? | On exhausted failure |
 |---|---|---|
-| Git / Python / CMake / VS Code (`Install-WingetApp`) | **No retry** — single winget attempt | Fatal (`Stop-Install`) |
+| Git / Python / CMake / VS Code (`Install-WingetApp`) | Retry w/ backoff (3×, 2s/4s) — closed 2026-07-26, see below | Fatal (`Stop-Install`) |
 | PlatformIO IDE extension | No retry | Fatal (required) |
 | Markdown Preview / Git Graph extensions | No retry | Warning only, continues (not required) |
 | Clone OwnTech Core | Retry w/ backoff (3×, 2s/4s) + auto-heals an incomplete/corrupt clone | Fatal |
@@ -1025,12 +1053,13 @@ wizard work, not treating it as a detail to figure out later.
 | Build firmware | No retry — single `pio run` attempt | Fatal (shows last 25 log lines) |
 | Preflight (Windows version, winget, disk space, path) | N/A — these are validation, not network calls | Fatal |
 
-**A real gap this surfaced**: only the four network-download call sites (bundle, `get-platformio.py`, 7za,
-`git clone`) got retry-with-backoff in today's hardening — the four `winget`-based installs (Git, Python,
-CMake, VS Code) did not, despite being just as exposed to a transient network blip. Worth closing before
-or alongside wizard work, since a wizard surfacing a "Git install failed" fatal dialog on a blip that a
-retry would have silently absorbed undercuts the whole resilience story. Not fixed as part of this
-documentation pass — flagged here as a concrete follow-up.
+~~**A real gap this surfaced**: ... the four `winget`-based installs (Git, Python, CMake, VS Code)
+[lacked retry]~~ — **closed 2026-07-26**: `Install-WingetApp` now wraps its `winget install` call in
+`Invoke-WithRetry`, tested with a fake `winget.cmd` shim (real `winget` can't be pointed at a controllable
+local stand-in the way HTTP downloads can). See "winget retry-with-backoff closed the coverage gap" near
+the end of this doc for the full writeup. The PlatformIO IDE extension and the two optional VS Code
+extensions remain the only required-but-unretried steps left — a smaller, lower-traffic gap (one install
+call each vs. `winget`'s four), not addressed in this pass.
 
 For fatal errors, the wizard can reuse `Stop-Install`'s existing `$Reason`/`$Remediation` strings verbatim
 in its error dialog — they're already written to be specific and user-facing, no new copy needed.
@@ -1070,15 +1099,23 @@ flowchart TD
     Redirect -- no --> ProgressScreen[/"Screen 3: progress checklist"/]:::screen
     RedirNote --> ProgressScreen
 
-    ProgressScreen --> S1["1. Git\n(no retry -- single attempt)"]
-    S1 -- fails --> F_Git["FATAL: Git install failed"]:::fatal
-    S1 -- ok --> S2["2. Python\n(no retry)"]
-    S2 -- fails --> F_Py["FATAL: Python install failed"]:::fatal
-    S2 -- ok --> S3["3. CMake\n(no retry)"]
-    S3 -- fails --> F_CMake["FATAL: CMake install failed"]:::fatal
-    S3 -- ok --> S4["4. VS Code\n(no retry)"]
-    S4 -- fails --> F_VSC["FATAL: VS Code install failed"]:::fatal
-    S4 -- ok --> S5["5. Extensions:\nPlatformIO (required), Markdown\nPreview + Git Graph (optional)"]
+    ProgressScreen --> S1["1. Git (winget)"]
+    S1 -- "blip" --> R1["auto-retry, 2s/4s backoff"]:::recoverable
+    R1 -- recovered --> S1
+    R1 -- exhausted --> F_Git["FATAL: Git install failed"]:::fatal
+    S1 -- ok --> S2["2. Python (winget)"]
+    S2 -- "blip" --> R2["auto-retry"]:::recoverable
+    R2 -- recovered --> S2
+    R2 -- exhausted --> F_Py["FATAL: Python install failed"]:::fatal
+    S2 -- ok --> S3["3. CMake (winget)"]
+    S3 -- "blip" --> R3["auto-retry"]:::recoverable
+    R3 -- recovered --> S3
+    R3 -- exhausted --> F_CMake["FATAL: CMake install failed"]:::fatal
+    S3 -- ok --> S4["4. VS Code (winget)"]
+    S4 -- "blip" --> R4["auto-retry"]:::recoverable
+    R4 -- recovered --> S4
+    R4 -- exhausted --> F_VSC["FATAL: VS Code install failed"]:::fatal
+    S4 -- ok --> S5["5. Extensions:\nPlatformIO (required, no retry), Markdown\nPreview + Git Graph (optional, no retry)"]
     S5 -- "PlatformIO ext fails" --> F_Ext["FATAL"]:::fatal
     S5 -- "optional ext fails" --> WarnExt["non-blocking warning,\ncontinue"]:::recoverable
     WarnExt --> S6
