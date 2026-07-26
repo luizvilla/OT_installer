@@ -1221,15 +1221,59 @@ starts using it.
 **Not included in this plan**: the actual Inno Setup wizard code and the live multi-bar progress UI itself
 — this plan only covers making the underlying script callable in a way that UI can be built on top of.
 
+#### Per-phase refactor implemented (2026-07-26) — all 6 steps, one real bug found and fixed
+
+All six steps above are implemented and pushed, each as its own commit exactly as planned:
+
+1. `Get-InstallState`/`Save-InstallState` — state persistence, wired in with no behavior change.
+2. `-RunPhase <name>` and `-ListPhases` — isolated single-phase invocation, defaulting to the full
+   sequential run when omitted. `install_owntech.ps1 -ListPhases` now prints all 11 phase names in order.
+3. Prerequisites split into `git`/`python`/`cmake` (headers `Phase 1a/1b/1c` — kept the "Phase 5" etc.
+   numbering traceable against this doc's history rather than renumbering everything).
+4. Smoke-test build split into `bundle`/`bootstrap`/`build` (`Phase 5a/5b/5c`) — the highest-value split,
+   confirmed by every timing measurement in this doc showing that combined phase at ~68% of total time.
+5. Re-verified against a **real full reset+reinstall cycle** (not just `test_hardening.ps1`): **8m13s**,
+   essentially identical to the pre-refactor real-URL baseline of 8m08s — the refactor changed nothing
+   about actual behavior or performance in the default (no `-RunPhase`) path. Recorded in
+   `install_timing_history.csv` as `post-refactor-verification`.
+6. New Group 4 in `test_hardening.ps1`: runs all 11 phases as separate child processes (mirroring exactly
+   how a wizard's `Exec` calls would work), then asserts the resulting state matches a normal default run's
+   — proving the mechanism itself, not just that each phase happens to succeed alone.
+
+**Building step 6's test caught a real bug that steps 1–5 all missed.** `Get-InstallState`'s file
+originally lived at `<ProjectPath>\.owntech_install_state.json` — directly inside the project folder.
+`Get-RepoPath`'s "is this folder empty, or do I need to nest into a `Core` subfolder" check saw that file
+and always concluded "non-empty" on a genuinely fresh install, so every truly-fresh clone landed at
+`D:\owntech\Core` instead of `D:\owntech` directly. This is exactly why step 5 (a real reset) matters
+independently of steps 1–4's own inline verification: every check in steps 1–4 ran against an
+*already-configured* `D:\owntech` (idempotent skip paths throughout), which never exercises the
+genuinely-empty-folder branch of `Get-RepoPath` at all — only step 5's full wipe-and-reinstall did, and
+even there it wasn't obviously wrong (the install still reported success, since the script stayed
+internally consistent about the nested path throughout) — it took step 6 explicitly comparing directory
+layout expectations to surface it clearly enough to fix. Fixed by moving the state file entirely outside
+the project directory, to `%LOCALAPPDATA%\OwnTechInstaller\install_state_<MD5 of normalized ProjectPath>.json`
+— which also incidentally resolves an earlier-flagged, smaller concern (the file showing up in `git
+status` inside what becomes the user's actual Core checkout). Re-verified after the fix: a real full
+install now clones directly into `D:\owntech` again, full suite 8/8.
+
+**Current state**: `install_owntech.ps1` works exactly as before when run without `-RunPhase` (the only way
+it's been run in practice so far). The 11 phases (`preflight`, `git`, `python`, `cmake`, `vscode`,
+`extensions`, `clone`, `bundle`, `bootstrap`, `build`, `summary`) are each independently invocable via
+`-RunPhase <name> -ProjectPath <path> -NonInteractive`, with state flowing correctly across real process
+boundaries — proven, not assumed. This is now genuinely ready for a wizard's `[Code]` section to drive.
+
+**Not done**: the actual Inno Setup wizard itself — this refactor only builds what it needs to stand on.
+
 ## Open decisions
 
 - ~~Distribution: plain script vs. a signed `.exe` wrapper — defer until the script itself is proven
   reliable.~~ — the script is now well-evidenced as reliable (see the hardening and real-world-cycle work
-  above); a full wizard design proposal exists (see "GUI wizard design" above) but is not yet built. Of
-  the two prerequisites identified there: ~~extending retry-with-backoff to the four `winget`-based
-  installs~~ is done (see "winget retry-with-backoff closed the coverage gap"); the script-side per-phase
-  refactor needed for the multi-bar progress UI has a concrete step-by-step plan (see "Per-phase refactor
-  implementation plan") but isn't implemented yet.
+  above); a full wizard design proposal exists (see "GUI wizard design" above) but is not yet built. Both
+  prerequisites identified there are now done: ~~extending retry-with-backoff to the four `winget`-based
+  installs~~ (see "winget retry-with-backoff closed the coverage gap") and ~~the script-side per-phase
+  refactor needed for the multi-bar progress UI~~ (see "Per-phase refactor implemented" — all 6 steps,
+  `-RunPhase`/`-ListPhases` working and verified against a real reset+reinstall cycle). What's left is the
+  actual Inno Setup wizard code itself, not yet started.
 - ~~Whether Windows needs a USB driver for the SPIN board...~~ — answered, 2026-07-26: no. See "SPIN board
   USB/upload path verified on real hardware" near the end of this doc.
 - Whether the installer replaces Steps 1–6 in `environment_setup.md` outright, or the docs keep the
