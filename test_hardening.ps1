@@ -12,14 +12,22 @@ Automated test suite for the Phase 3/4/5 hardening work (see windows_installer_p
      the real one on PATH, controllable to fail a set number of times before
      succeeding, since real winget can't be pointed at a controllable local stand-in
      the way HTTP downloads can.
+  4. Per-phase invocation test: runs all 11 -RunPhase values as separate child
+     processes in order (mirroring how a wizard's [Code] section would drive them via
+     Exec) against an already-configured D:\owntech, then compares the resulting
+     install-state file against one produced by a normal default (no -RunPhase) run --
+     proving the per-phase mechanism reproduces a full run's result, not just that
+     each phase runs without error in isolation.
 
 Usage:
     .\test_hardening.ps1
 
-Safe to run repeatedly; each test uses a fresh temp destination and cleans up after
-itself. Does not touch D:\owntech, D:\.platformio_core, or any installed software --
-this only exercises Test-ProjectPath and Invoke-BundleSeed in isolation, never the full
-install_owntech.ps1 pipeline end to end.
+Safe to run repeatedly; Groups 1-3 use fresh temp destinations and clean up after
+themselves, touching neither D:\owntech nor D:\.platformio_core. Group 4 is the
+exception -- it runs the real install_owntech.ps1 pipeline (twice, once per-phase and
+once as a full run) against the actual D:\owntech checkout, relying on every step
+being idempotent on an already-configured machine; it skips itself with a clear
+message if D:\owntech isn't present rather than trying to set one up.
 #>
 
 $ErrorActionPreference = 'Continue'
@@ -294,6 +302,70 @@ Install-WingetApp -Id 'Fake.AlwaysFails' -DisplayName 'FakeAppFail' -VerifyComma
 
 if ($mainIdx -ge 0) {
     Remove-Item $funcOnlyPath -Force -ErrorAction SilentlyContinue
+}
+
+# ----------------------------------------------------------------------------
+# Group 4: -RunPhase sequence reproduces a full run's result
+# ----------------------------------------------------------------------------
+Write-Host ""
+Write-Host "== Group 4: per-phase invocation vs. a full run ==" -ForegroundColor Cyan
+
+$verifyProjectPath = 'D:\owntech'
+if (-not (Test-Path (Join-Path $verifyProjectPath '.git'))) {
+    Record-Result 'Per-phase sequence matches a full run' $false `
+        "Skipped -- $verifyProjectPath isn't a configured OwnTech checkout on this machine to compare against."
+} else {
+    # Both sides run against the same already-configured project, so every
+    # step takes the idempotent skip path on both sides -- this proves the
+    # per-phase *mechanism* (state correctly flows across real process
+    # boundaries, every phase's own exit code is 0) reproduces a full run's
+    # result, not that a fresh install works (that's what the real timed
+    # cycle in windows_installer_plan.md's "Step 5" already verified).
+    $orderedPhases = @('preflight', 'git', 'python', 'cmake', 'vscode', 'extensions', 'clone', 'bundle', 'bootstrap', 'build', 'summary')
+    $allPhasesOk = $true
+    $phaseExitCodes = @{}
+
+    foreach ($phase in $orderedPhases) {
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript `
+            -RunPhase $phase -ProjectPath $verifyProjectPath -NonInteractive 2>&1 | Out-String
+        $exit = $LASTEXITCODE
+        $phaseExitCodes[$phase] = $exit
+        if ($exit -ne 0) {
+            $allPhasesOk = $false
+            Write-Host "  --- -RunPhase $phase failed (exit $exit) ---" -ForegroundColor Yellow
+            Write-Host ($out -split "`n" | Select-Object -Last 10 | Out-String)
+        }
+    }
+
+    # Get-StateFilePath is a function dot-sourced into this session by Group
+    # 2 above (still defined in memory even though $funcOnlyPath itself was
+    # deleted after Group 3) -- reuse it rather than duplicating its hashing
+    # logic here and risking the two drifting apart.
+    $stateFile = Get-StateFilePath $verifyProjectPath
+    $perPhaseState = if (Test-Path $stateFile) { Get-Content $stateFile -Raw | ConvertFrom-Json } else { $null }
+
+    # Now the same project via one continuous default (no -RunPhase) run --
+    # exactly how this script has always been invoked before this refactor.
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript `
+        -ProjectPath $verifyProjectPath -NonInteractive 2>&1 | Out-Null
+    $fullRunExit = $LASTEXITCODE
+    $fullRunState = if (Test-Path $stateFile) { Get-Content $stateFile -Raw | ConvertFrom-Json } else { $null }
+
+    $statesMatch = $false
+    if ($perPhaseState -and $fullRunState) {
+        $statesMatch = ($perPhaseState.ProjectPath -eq $fullRunState.ProjectPath) -and
+                       ($perPhaseState.RepoPath -eq $fullRunState.RepoPath) -and
+                       ($perPhaseState.CoreDir -eq $fullRunState.CoreDir) -and
+                       ($perPhaseState.Installed.git -eq $fullRunState.Installed.git) -and
+                       ($perPhaseState.Installed.python -eq $fullRunState.Installed.python) -and
+                       ($perPhaseState.Installed.cmake -eq $fullRunState.Installed.cmake) -and
+                       ($perPhaseState.Installed.code -eq $fullRunState.Installed.code)
+    }
+
+    $passed = $allPhasesOk -and ($fullRunExit -eq 0) -and $statesMatch
+    $failedPhases = ($phaseExitCodes.GetEnumerator() | Where-Object { $_.Value -ne 0 } | ForEach-Object { $_.Key }) -join ','
+    Record-Result 'Per-phase sequence matches a full run' $passed `
+        "all-11-phases-exit-0=$allPhasesOk (failed: $failedPhases), full-run-exit=$fullRunExit, states-match=$statesMatch"
 }
 
 # ----------------------------------------------------------------------------

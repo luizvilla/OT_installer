@@ -149,7 +149,19 @@ function Install-VSCodeExtension($Id, $DisplayName, [switch]$Required) {
 }
 
 function Get-StateFilePath($ProjectPath) {
-    return Join-Path $ProjectPath '.owntech_install_state.json'
+    # Deliberately NOT inside $ProjectPath: Get-RepoPath decides whether to
+    # clone directly into the project folder or nest into a Core subfolder
+    # based on whether that folder is empty -- a state file living there
+    # would make it look non-empty on the very first run, before anything
+    # is cloned, causing every fresh install to nest unnecessarily. Also
+    # avoids the file showing up in `git status` inside what becomes the
+    # user's actual Core checkout.
+    $stateDir = Join-Path $env:LOCALAPPDATA 'OwnTechInstaller'
+    New-Item -ItemType Directory -Path $stateDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $normalized = $ProjectPath.TrimEnd('\').ToLowerInvariant()
+    $hashBytes = [System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalized))
+    $hash = [System.BitConverter]::ToString($hashBytes) -replace '-', ''
+    return Join-Path $stateDir "install_state_$hash.json"
 }
 
 function Get-InstallState($ProjectPath) {
