@@ -1400,6 +1400,13 @@ killed via a safety timeout. `Abort` is Inno Setup's standard, documented API fo
 the change itself is small and low-risk, but this specific path genuinely needs a real interactive run to
 fully confirm.
 
+*(Correction, 2026-07-27 — see "Open in VS Code on Finish" below: `/VERYSILENT` only suppresses Inno
+Setup's own built-in wizard pages, not `MsgBox` calls from `[Code]` — those are ordinary Windows dialogs
+needing a real click regardless. The "auto-answered exactly once" case above was the user, present at the
+machine, clicking through a real dialog — not an automated mechanism. The observations themselves are
+still accurate; the mechanism assumed to explain them was not. This effectively means the Abort fix *was*
+confirmed by a real interactive run already, just not recognized as one at the time.)*
+
 ~~**Recommended next action, not yet done**: run `wizard\dist\OwnTechInstaller.exe` interactively...~~ —
 done, see "First real dry run" immediately below. It found real bugs the automated testing above couldn't
 have caught, exactly as expected from something needing a human at the keyboard.
@@ -1496,6 +1503,34 @@ directly, as happened here.
   inserted early in the flow, while this standard page keeps its normal late position. Fixed with
   `DisableDirPage=yes`; also proactively skipped the same-category "Ready to Install" confirmation
   (`ShouldSkipPage(wpReady)`) for the same reason, before it was reported as a separate complaint.
+
+#### Open in VS Code on Finish, skip the trust prompt (2026-07-27)
+
+Requested: since the user will need to open VS Code to actually work anyway, offer to do it automatically
+at the end, and skip VS Code's "do you trust this folder?" prompt while at it.
+
+Implemented via Inno Setup's standard `[Run]` `postinstall` mechanism — a checked-by-default checkbox on
+the Finished page (`skipifsilent` so it never fires during unattended installs) — rather than trying to
+replicate `install_owntech.ps1`'s own `[Y/n]` prompt in Pascal, which never fires here anyway since every
+`-RunPhase` call passes `-NonInteractive`. Launches via `code --disable-workspace-trust <path>`; checked
+the official docs before using this specifically to confirm it's session-only (not a persistent or global
+setting change) — https://code.visualstudio.com/docs/editor/workspace-trust — a reasonable trade-off for a
+folder this same script just freshly cloned from the official repo, without weakening trust for anything
+else opened later. `GetActualRepoPath` mirrors `Get-RepoPath`'s own nested-`Core`-subfolder decision (same
+`DirExists` checks) so the right folder opens even in that edge case, rather than reading the install-state
+file back from Pascal.
+
+Verified: compiles clean. Two automated `/VERYSILENT` re-confirmation attempts appeared to hang at the
+overwrite-confirmation dialog — this led to a **correction to the earlier "VERYSILENT's own dialog
+auto-dismissal is unreliable" finding above**: `/VERYSILENT` only suppresses Inno Setup's own built-in
+wizard *pages*, not `MsgBox` calls made from `[Code]` — those are ordinary Windows dialogs and always need
+a real click regardless of the silence flag. Every earlier case logged as "auto-answered" was actually the
+user present at the machine clicking through a real, visible dialog (sometimes promptly, sometimes not) —
+not an automated simulation as assumed at the time. The raw observations recorded earlier (which messages
+appeared, in what order, with what text) remain accurate and still valid evidence for what they verified;
+only the *mechanism* explaining the inconsistent timing was wrong. In effect, every dialog-driven test in
+this whole file — including the retry-path mechanism and the `Abort`/`NextButtonClick` fix — was already a
+real interactive confirmation, not merely an automated one as characterized at the time.
 
 ## Open decisions
 
