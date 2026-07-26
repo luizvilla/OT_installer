@@ -137,6 +137,46 @@ function Install-VSCodeExtension($Id, $DisplayName, [switch]$Required) {
     Write-Ok "$DisplayName extension installed."
 }
 
+function Get-StateFilePath($ProjectPath) {
+    return Join-Path $ProjectPath '.owntech_install_state.json'
+}
+
+function Get-InstallState($ProjectPath) {
+    # Carries state across process boundaries for -RunPhase (see below) --
+    # each isolated phase invocation is a fresh process with no memory of
+    # what earlier phases computed, unlike today's single continuous run.
+    # Returns an ordered hashtable (not the PSCustomObject ConvertFrom-Json
+    # produces) so callers can keep using $state.Installed.Keys / bracket
+    # assignment exactly like the existing in-memory $installed hashtable --
+    # PowerShell 5.1's ConvertFrom-Json has no -AsHashtable, so this converts
+    # manually, same pattern already used in Set-VSCodeAutoRebuildSetting.
+    $path = Get-StateFilePath $ProjectPath
+    $state = [ordered]@{
+        ProjectPath = $ProjectPath
+        RepoPath    = $null
+        CoreDir     = $null
+        Installed   = [ordered]@{}
+    }
+    if (Test-Path $path) {
+        try {
+            $parsed = Get-Content $path -Raw | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed.RepoPath) { $state.RepoPath = $parsed.RepoPath }
+            if ($parsed.CoreDir) { $state.CoreDir = $parsed.CoreDir }
+            if ($parsed.Installed) {
+                $parsed.Installed.PSObject.Properties | ForEach-Object { $state.Installed[$_.Name] = $_.Value }
+            }
+        } catch {
+            Write-Warn "Could not parse install state file at $path ($($_.Exception.Message)) -- starting fresh."
+        }
+    }
+    return $state
+}
+
+function Save-InstallState($ProjectPath, $State) {
+    $path = Get-StateFilePath $ProjectPath
+    $State | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding utf8
+}
+
 function Test-PythonReal {
     # On many Windows 10/11 machines, 'python' resolves to the Microsoft Store
     # "App execution alias" stub (%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe)
@@ -672,6 +712,15 @@ foreach ($k in $installed.Keys) {
     if ($installed[$k]) { Write-Ok "$k already detected on PATH." }
 }
 
+# Persisted for a future -RunPhase mode (see windows_installer_plan.md,
+# "Per-phase refactor implementation plan") -- not read back anywhere yet,
+# so this has no effect on the behavior below.
+$installState = Get-InstallState -ProjectPath $resolvedProjectPath
+$installState.ProjectPath = $resolvedProjectPath
+$installState.CoreDir = Get-PlatformIOCoreDir
+$installState.Installed = $installed
+Save-InstallState -ProjectPath $resolvedProjectPath -State $installState
+
 # --- Phase 1: Prerequisites ---
 Write-Phase "Phase 1: Install prerequisites (Git, Python, CMake)"
 
@@ -698,6 +747,10 @@ Write-Phase "Phase 4: Clone the Core repository"
 
 $repoPath = Get-RepoPath -ProjectPath $resolvedProjectPath
 Invoke-CloneCore -RepoPath $repoPath
+
+# Same as above -- not yet read back anywhere, no behavior change.
+$installState.RepoPath = $repoPath
+Save-InstallState -ProjectPath $resolvedProjectPath -State $installState
 
 # --- Phase 5: Smoke-test build ---
 if ($SkipBuildTest) {
