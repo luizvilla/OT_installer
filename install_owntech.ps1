@@ -631,8 +631,22 @@ function Get-CoreDirForPhase($State) {
     # isn't reliably inherited (e.g. a wizard's own process snapshot predates
     # preflight's registry write) -- prefer the persisted state, which is
     # always correct regardless of process history, over recomputing live.
-    if ($State.CoreDir) { return $State.CoreDir }
-    return Get-PlatformIOCoreDir
+    $coreDir = if ($State.CoreDir) { $State.CoreDir } else { Get-PlatformIOCoreDir }
+
+    # Getting $coreDir right in *this* process isn't enough on its own:
+    # get-platformio.py and 'pio' itself decide where to read/write by
+    # reading the PLATFORMIO_CORE_DIR *environment variable* from their own
+    # process, not a value this script computed. A direct child process
+    # (python, pio.exe) inherits whatever is set here at the moment it's
+    # spawned -- so this must be set explicitly before Bootstrap/Build spawn
+    # theirs, rather than assumed to already be correct from process
+    # inheritance, which -RunPhase's fresh-process-per-phase model breaks.
+    # Real bug found running the wizard against C:\owntech: bootstrap
+    # "succeeded" (exit 0) but penv never appeared, because get-platformio.py
+    # silently installed to the untouched default %USERPROFILE%\.platformio
+    # instead of the redirected core dir.
+    $env:PLATFORMIO_CORE_DIR = $coreDir
+    return $coreDir
 }
 
 function Invoke-PhaseBundleFetch($State) {
@@ -862,6 +876,14 @@ if ($RunPhase) {
             exit 1
         }
         $state = Get-InstallState -ProjectPath $ProjectPath
+        # preflight already does this for itself; every other phase is
+        # potentially a fresh process that needs it too -- e.g. 'bootstrap'
+        # calling bare 'python', or 'clone' needing a 'git' some earlier
+        # phase (in some earlier, separate process) just installed. Without
+        # this, a genuinely fresh install (prerequisites installed for the
+        # first time during this same run) can fail a later phase on a
+        # stale PATH that predates that install.
+        Update-SessionPath
     }
     switch ($RunPhase) {
         'preflight'  { Invoke-PhasePreflight | Out-Null }
