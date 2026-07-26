@@ -1,0 +1,4 @@
+# Local test/run artifacts -- not meant to be tracked
+*.log
+*.zip
+desktop.ini
