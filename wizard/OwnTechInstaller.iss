@@ -266,9 +266,15 @@ begin
   begin
     if not RunPhaseWithRetry(I) then
     begin
+      // WizardForm.Close alone does NOT abort Setup -- it only closes the
+      // wizard's page navigation; the underlying Setup process then
+      // continues on to its own [Files]/[Run] step and reports success
+      // regardless. Found by actually testing this path (see
+      // windows_installer_plan.md, "Wizard build results"): a forced Git
+      // failure correctly showed Retry/Retry/Cancel, but Setup still
+      // finished with exit 0 afterward. Abort is the real way to terminate.
       MsgBox('Setup cannot continue without completing this step.', mbError, MB_OK);
-      WizardForm.Close;
-      Exit;
+      Abort;
     end;
   end;
 end;
