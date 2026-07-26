@@ -129,11 +129,14 @@ as an open-source script.
 
 - `code --install-extension platformio.platformio-ide`
 - Verify via `code --list-extensions` that it actually landed.
+- Also installs two general-purpose extensions users need beyond PlatformIO itself:
+  `shd101wyy.markdown-preview-enhanced` and `mhutchie.git-graph`. See "Phase 3/4/5 hardening" below.
 
 ### Phase 4 — Clone the Core repository
 
 - `git clone https://github.com/owntech-foundation/Core` into the folder validated in Phase 0.
 - Confirm the clone succeeded and `main` is checked out.
+- Hardened against interrupted clones and transient network drops — see "Phase 3/4/5 hardening" below.
 
 ### Phase 5 — Smoke-test build
 
@@ -155,6 +158,8 @@ as an open-source script.
   than the user discovering a broken setup only after clicking Build manually later — and it means
   opening the cloned project in VS Code afterward (Phase 6) is instant instead of re-triggering the
   extension's own multi-minute bootstrap.
+- Network calls in this phase (bundle zip, `get-platformio.py`, the 7za NuGet fetch) retry with backoff
+  on transient failures rather than failing on the first blip. See "Phase 3/4/5 hardening" below.
 
 ### Phase 6 — Wrap-up
 
@@ -792,6 +797,66 @@ fully real-world number in the whole investigation: no localhost shortcuts anywh
 download, `pip`/PlatformIO installs, winget installs all hit real servers), and it still lands at a 38%
 total reduction from the original baseline with zero manual or elevated steps required. This closes out
 the "not yet done" item directly above.
+
+### Phase 3/4/5 hardening + automated test suite — design (2026-07-26)
+
+Prompted by discussing a future GUI wizard for bad-path prompting and network-interruption handling: a
+wizard's UI can make these nicer to interact with (live validation, a Retry button), but the actual
+correctness has to live in the script regardless of whether a GUI ever wraps it — the wizard would just be
+a presentation layer on top. So this hardens the script itself first, testable without any GUI, before any
+wizard work starts.
+
+**1. `Get-RepoPath`/`Invoke-CloneCore`'s clone-completeness check is too weak.** Today it only checks that
+a `.git` folder exists before treating a project path as "already cloned, skip." An interrupted `git
+clone` can leave `.git` present with an incomplete/corrupt working tree — a re-run would then skip
+re-cloning based on that flawed signal. In practice `Invoke-CloneCore`'s existing branch check (`git
+rev-parse --abbrev-ref HEAD` must be `main`) already catches a badly broken clone rather than silently
+proceeding, but it reports a misleading error ("on branch '', not 'main'") with a remediation ("run git
+checkout main") that won't actually fix a corrupted clone — the user is left to manually delete the folder
+and re-run. Fix: add a real completeness check (`git rev-parse HEAD` succeeds) and, if it fails, auto-heal
+by removing the broken clone and re-cloning fresh, rather than erroring out with unhelpful remediation.
+This is the actual mechanism behind "resume where you left off" for this phase — not resuming a
+partial clone mid-transfer (git doesn't support that cleanly for a plain clone), but detecting corruption
+and automatically redoing just that step.
+
+**2. No retry-with-backoff around network calls.** `Invoke-WebRequest` (bundle zip, `get-platformio.py`,
+the 7za NuGet fetch) and `git clone` currently fail once and either fall back (bundle, optional) or stop
+the whole install (`get-platformio.py`, required) on any failure — including a transient blip that would
+have succeeded a few seconds later. Adding a generic `Invoke-WithRetry` helper (3 attempts, exponential
+backoff starting at 2s) wrapping each of these absorbs transient drops automatically, without requiring
+the user to notice a failure and manually re-run at all — strictly better UX than a wizard's "Retry"
+button, since it doesn't need user interaction for the common transient case. For `git clone` specifically,
+each retry attempt must remove any partial destination folder first (`git clone` refuses to write into a
+non-empty directory), reusing the same cleanup logic as fix 1 above.
+
+**3. Two more VS Code extensions in Phase 3**, unrelated to the resilience work but requested alongside
+it: `shd101wyy.markdown-preview-enhanced` and `mhutchie.git-graph`, installed and verified the same way
+`platformio.platformio-ide` already is (`code --install-extension`, confirmed via `code
+--list-extensions`).
+
+**Automated test suite design** (`test_hardening.ps1`, new file):
+
+- **Bad-path tests**: since `Stop-Install` calls `exit 1` on the whole process (by design — it's meant to
+  stop the real installer dead), these can't be tested by dot-sourcing functions into the same session
+  without killing the test runner after the first case. Instead each case spawns `install_owntech.ps1` as
+  a genuine child process (`-ProjectPath <bad> -NonInteractive -SkipBuildTest`) and asserts on the child's
+  exit code and console output — this also happens to be a more realistic test than calling the function
+  directly, since it exercises the actual invocation path a real user hits. Cases: a path containing a
+  space, a path ≥256 characters, and a path containing the literal string `OneDrive` (`Test-ProjectPath`'s
+  check is a string/env-var match, not a real sync-status check, so this is testable without an actual
+  OneDrive client installed).
+- **Simulated network-outage tests**: reusing the local-HTTP-server technique from the bundle-publishing
+  work (a controllable stand-in for "the internet," since it can be started and killed on command, unlike
+  a real connection). Two cases against `Invoke-BundleSeed`, dot-sourced directly:
+  - *Transient outage, recovered by retry*: start the server, kill it before the first attempt completes,
+    then restart it before the retry's backoff delay elapses — asserts the overall call still succeeds,
+    proving the retry mechanism actually recovers, not just that it retries.
+  - *Sustained outage, retries exhausted*: kill the server and never restart it — asserts the call fails
+    gracefully (existing fallback behavior: `Write-Warn` and return, no exception escaping, no corrupted
+    partial state left behind), matching the bundle-seed step's existing "optional, safe to skip" contract.
+
+Not yet implemented at the time this was written — see the next section for results once the above is
+built and run.
 
 ## Open decisions
 
