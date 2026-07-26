@@ -739,6 +739,28 @@ actual GitHub Release), and the bundle still isn't published anywhere. `pip`/Pla
 dependency downloads (lines like `Downloading platformio-6.1.19-py3-none-any.whl`) also hit the real
 internet each time and aren't cached by anything this project controls.
 
+#### Project moved to its own repo; bundle published and verified over real internet (2026-07-26)
+
+This project moved from an untracked local folder into its own git repo,
+[`luizvilla/OT_installer`](https://github.com/luizvilla/OT_installer) (public) — the scripts, this doc,
+and `install_timing_history.csv` are now version-controlled there; raw per-run `install_timing_*.log`
+files and the vendored `Core` firmware clone were deliberately left out (see that repo's `.gitignore` and
+initial commit message). `windows_installer_plan.md` itself now lives in that repo — this is the same file,
+continued.
+
+Published `pio_bundle_v2.zip` as a real GitHub Release for the first time: `gh release create
+pio-bundle-20260726 pio_bundle_v2.zip --repo luizvilla/OT_installer`, asset at
+`https://github.com/luizvilla/OT_installer/releases/download/pio-bundle-20260726/pio_bundle_v2.zip`.
+Verified the actual `-BundleUrl` mechanism end to end against this real, public, unauthenticated URL (not
+localhost) for the first time: `Invoke-WebRequest` (no auth, exactly as `Invoke-BundleSeed` does it) —
+**18.5s to download 0.36GB** (~20 MB/s on this connection), SHA256 verified correct
+(`A566EF91DF4A7E9F734E0058185037AF59C82469E76F176F3AC993326C28FD67`). This closes the last open caveat on
+the 452s full-cycle number above: even over the real internet (on a decent connection), download is a
+small fraction of `Invoke-BundleSeed`'s total — 18.5s vs. the ~146s 7za extraction still dominating,
+consistent with the localhost figure. Not yet done: re-running the full `run_timed_install_test.ps1` cycle
+against this real public URL instead of localhost, for a fully real-world (not localhost-download) end to
+end number to sit alongside the 452s one above.
+
 ## Open decisions
 
 - Distribution: plain script users download and run, vs. a signed `.exe` wrapper — defer until the
@@ -759,8 +781,10 @@ internet each time and aren't cached by anything this project controls.
   install/uninstall), wired into `Invoke-BundleSeed`, verified both in isolation (167.4s full pipeline vs.
   a projected ~1200s unfixed) and via a real full `run_timed_install_test.ps1` cycle (452s total vs. the
   609s-with-manual-Defender-exclusion / 789s-original-baseline prior bests — see "Full timed
-  reset+reinstall cycle" above). Still open: publishing an actual bundle release (`pio_bundle_v2.zip`
-  still isn't hosted anywhere — every test so far, including the full-cycle one, used a local HTTP server).
+  reset+reinstall cycle" above). ~~Still open: publishing an actual bundle release...~~ — done: published
+  to `luizvilla/OT_installer`'s `pio-bundle-20260726` release, real unauthenticated download verified
+  (18.5s/0.36GB, correct hash) — see "Project moved to its own repo..." above. Still open: a full
+  `run_timed_install_test.ps1` cycle against the real public URL instead of localhost.
 - Whether the "full downloadable local installer" (Inno Setup/NSIS/signed `.exe`, or a mountable
   VHD/VHDX) is still worth pursuing now that it's no longer needed to fix Phase 5 specifically — it may
   still be worth it purely for distribution/offline UX, but that's now a separate question from extraction
