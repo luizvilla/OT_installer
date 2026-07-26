@@ -915,12 +915,52 @@ but that specific code path has never been exercised against a real machine lack
 deliberately open rather than picked up next; revisit only if a Windows 10 VM becomes available cheaply,
 or if a real user reports hitting the missing-winget path.
 
+#### SPIN board USB/upload path verified on real hardware (2026-07-26)
+
+A real SPIN board was connected to the dev machine, giving a first genuine test of the previously-unknown
+USB/upload behavior on Windows (`install_owntech.ps1` itself never touches this — it stops after a plain
+build, per this doc's own non-goals — but it's directly relevant to whether the installer's job is
+actually finished once it exits).
+
+- **No custom USB driver is needed.** The board enumerates in Device Manager as **"USB Serial Device"**
+  (Windows' generic inbox driver) on two COM ports simultaneously (`VID_2FE3&PID_0100`, one physical
+  device presenting two USB CDC-ACM interfaces) — no `.inf` install, no vendor driver, nothing for the
+  installer to do here. This matches the VID:PID (`hwgrep://2fe3:0100`) the project's own
+  `pio_extra.ini` already expects.
+- **`mcumgr.exe` is fetched automatically, but by the Core project, not by our installer.**
+  `owntech/scripts/pre_bootloader_serial.py` (a PlatformIO `pre:` script tied to the `[env:USB]`
+  environment) downloads a prebuilt `mcumgr.exe` (15.9MB, OS-specific — `mcumgr`/`mcumgr-mac`/`mcumgr-rpi`
+  on other platforms) from `github.com/owntech-foundation/mcumgr`'s own releases into the project's
+  `owntech/third_party/` folder, and reuses it on subsequent runs (`check_file_and_download` skips if
+  already present). Confirmed this already happened silently during today's earlier successful Phase 5
+  build tests — it's not upload-specific, it runs on any `pio run` targeting the `USB` environment (the
+  project's `default_envs`), build or upload alike. If the download fails, it degrades to a warning (not a
+  hard failure) noting ST-Link as a fallback, rather than blocking the build.
+- **Upload specifically pulls two more PlatformIO-managed packages not needed for a plain build**:
+  `tool-stm32duino` and `tool-dfuutil-arduino`, installed via PlatformIO's normal package manager the
+  first time `-t upload` actually runs. `install_owntech.ps1`'s Phase 5 smoke test (a plain build, by
+  design) doesn't pre-warm these — a user's first real Upload click will trigger a small additional
+  download beyond what the installer already did. Not proposing to change this now (matches the existing
+  "board upload stays manual for v1" non-goal), just recording it as a known, real gap for anyone later
+  considering extending Phase 5 or the bundle to cover it.
+- **An unrelated quirk surfaced, out of scope for this project**: because one physical board presents two
+  COM ports, `pre_bootloader_serial.py`'s own board-detection logic sees "2 boards" and prompts
+  interactively for manual selection even with only one board connected. This lives in OwnTech Core's
+  scripts, not `install_owntech.ps1`, and in VS Code's real integrated terminal it's just a normal
+  interactive prompt a user can answer directly. Attempting to script past it non-interactively
+  (`"1" | pio run -t upload`) hit an `EOFError` — almost certainly a PowerShell-piping-into-nested-Python-
+  subprocess artifact of the test harness, not a real product bug, and not chased further since it's
+  unrelated to what was being checked (driver requirements) and outside this project's scope either way.
+
+Net effect on the "USB driver" open decision: no driver-install step is needed anywhere in
+`install_owntech.ps1`, now confirmed on real hardware rather than inferred from reading code.
+
 ## Open decisions
 
 - Distribution: plain script users download and run, vs. a signed `.exe` wrapper — defer until the
   script itself is proven reliable.
-- Whether Windows needs a USB driver for the SPIN board (docs currently only mention an `mcumgr` issue
-  on macOS) — needs checking.
+- ~~Whether Windows needs a USB driver for the SPIN board...~~ — answered, 2026-07-26: no. See "SPIN board
+  USB/upload path verified on real hardware" near the end of this doc.
 - Whether the installer replaces Steps 1–6 in `environment_setup.md` outright, or the docs keep the
   manual steps with a "Quick install" callout pointing at the script.
 - Whether `environment_setup_script.md` (the video script) gets rewritten around running this
