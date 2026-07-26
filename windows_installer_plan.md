@@ -900,6 +900,21 @@ any time; it only touches isolated temp directories (`Test-ProjectPath` failures
 touch disk, and the network tests use throwaway `CoreDir`s under `$env:TEMP`), never `D:\owntech` or
 `D:\.platformio_core`.
 
+#### Windows 10 testing — deprioritized (2026-07-26)
+
+No Windows 10 machine is available to the maintainer, and options to get one (Microsoft's free
+time-limited developer VMs for VirtualBox/VMware/Hyper-V being the most direct; GitHub Actions'
+`windows-latest` runner does *not* substitute — it's Windows Server, a different OS family) all involve
+setup effort disproportionate to the actual risk here. Reasoning: Windows 10 and 11 both ship the same
+Windows PowerShell 5.1 by default, so everything hardened this session (the progress-bar bug, the
+stderr-as-terminating-error behavior, retry logic, path validation) should behave identically on both —
+none of it is Windows-version-specific. The one genuinely Windows-10-specific gap is the cold-start path
+where `winget` itself isn't pre-installed (Windows 11 ships with it; older Windows 10 builds sometimes
+don't) — Phase 0 already detects this and points the user at installing "App Installer" from the Store,
+but that specific code path has never been exercised against a real machine lacking `winget`. Left
+deliberately open rather than picked up next; revisit only if a Windows 10 VM becomes available cheaply,
+or if a real user reports hitting the missing-winget path.
+
 ## Open decisions
 
 - Distribution: plain script users download and run, vs. a signed `.exe` wrapper — defer until the
@@ -971,7 +986,8 @@ directions, either is reasonable to pick up next:
 2. **Close out the original test matrix** — Windows 10 (never actually tested; this machine is Windows
    11), ~~deliberately-bad paths (OneDrive/spaces/length...) and an interrupted-network scenario~~ — done,
    2026-07-26: see "Phase 3/4/5 hardening + test suite" near the end of this doc (`test_hardening.ps1`,
-   5/5 passed). Windows 10 remains the one item in this list still genuinely untested.
+   5/5 passed). Windows 10 remains the one item in this list still genuinely untested — see "Windows 10
+   testing — deprioritized" below for why this is being left open deliberately rather than picked up next.
 
 Use `reset_environment.ps1` (now supports `-NonInteractive -ProjectPath <path> -IncludePython`) or
 `run_timed_install_test.ps1` to reset between attempts. Check free disk space on both C: and D: before
