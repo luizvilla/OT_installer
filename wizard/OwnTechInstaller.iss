@@ -72,6 +72,7 @@ var
   ProgressPage: TWizardPage;
   Phases: array[0..PhaseCount - 1] of TPhaseInfo;
   StatusLabels: array[0..PhaseCount - 1] of TNewStaticText;
+  ProgressBars: array[0..PhaseCount - 1] of TNewProgressBar;
   PhasesStarted: Boolean;
 
 procedure InitPhaseList;
@@ -98,21 +99,67 @@ begin
     'not a single bar stuck for several minutes.');
   for I := 0 to PhaseCount - 1 do
   begin
-    RowTop := I * 24;
+    RowTop := I * 26;
     NameLabel := TNewStaticText.Create(ProgressPage);
     NameLabel.Parent := ProgressPage.Surface;
     NameLabel.Left := 0;
-    NameLabel.Top := RowTop;
-    NameLabel.Width := 220;
+    NameLabel.Top := RowTop + 2;
+    NameLabel.Width := 150;
     NameLabel.Caption := Phases[I].Label_;
+
+    ProgressBars[I] := TNewProgressBar.Create(ProgressPage);
+    ProgressBars[I].Parent := ProgressPage.Surface;
+    ProgressBars[I].Left := 155;
+    ProgressBars[I].Top := RowTop;
+    ProgressBars[I].Width := 190;
+    ProgressBars[I].Height := 16;
+    ProgressBars[I].Min := 0;
+    ProgressBars[I].Max := 100;
+    ProgressBars[I].Position := 0;
 
     StatusLabels[I] := TNewStaticText.Create(ProgressPage);
     StatusLabels[I].Parent := ProgressPage.Surface;
-    StatusLabels[I].Left := 230;
-    StatusLabels[I].Top := RowTop;
-    StatusLabels[I].Width := 200;
+    StatusLabels[I].Left := 355;
+    StatusLabels[I].Top := RowTop + 2;
+    StatusLabels[I].Width := 100;
     StatusLabels[I].Caption := 'Pending';
   end;
+end;
+
+// One row's visual state -- a real TNewProgressBar per phase, not just text.
+// Still can't show a true 0-100% *within* a step (none of the phases expose
+// a granular percentage signal -- see "GUI wizard design" in
+// windows_installer_plan.md), and a blocking Exec call prevents the message
+// loop from pumping, so npbstMarquee won't visibly animate *while* a step is
+// running -- but each state change (pending -> running -> done/failed) still
+// renders correctly at the moment it happens, via Repaint.
+procedure SetPhaseVisualState(const PhaseIndex: Integer; const State: String);
+begin
+  if State = 'running' then
+  begin
+    StatusLabels[PhaseIndex].Caption := 'Running...';
+    ProgressBars[PhaseIndex].Style := npbstMarquee;
+  end
+  else if State = 'done' then
+  begin
+    StatusLabels[PhaseIndex].Caption := 'Done';
+    ProgressBars[PhaseIndex].Style := npbstNormal;
+    ProgressBars[PhaseIndex].Position := ProgressBars[PhaseIndex].Max;
+  end
+  else if State = 'failed' then
+  begin
+    StatusLabels[PhaseIndex].Caption := 'Failed';
+    ProgressBars[PhaseIndex].Style := npbstNormal;
+    ProgressBars[PhaseIndex].Position := 0;
+  end
+  else // 'pending'
+  begin
+    StatusLabels[PhaseIndex].Caption := 'Pending';
+    ProgressBars[PhaseIndex].Style := npbstNormal;
+    ProgressBars[PhaseIndex].Position := 0;
+  end;
+  StatusLabels[PhaseIndex].Repaint;
+  ProgressBars[PhaseIndex].Repaint;
 end;
 
 procedure InitializeWizard;
@@ -164,6 +211,26 @@ begin
     Result := LogText; // fallback: something failed that didn't go through Stop-Install
 end;
 
+function IsDirEmpty(const Path: String): Boolean;
+var
+  FindRec: TFindRec;
+  Count: Integer;
+begin
+  Count := 0;
+  if FindFirst(Path + '\*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+          Count := Count + 1;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  Result := (Count = 0);
+end;
+
 // Runs one -RunPhase in a hidden cmd.exe (needed for '>' output redirection,
 // which Exec's Params doesn't interpret on its own -- it's not a shell) and
 // returns the process exit code. LogFile captures combined stdout+stderr so
@@ -181,6 +248,8 @@ begin
     Result := -1;
 end;
 
+function RunAllPhases: Boolean; forward;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   LogFile, FailureMsg: String;
@@ -191,6 +260,36 @@ begin
   if CurPageID = ProjectPathPage.ID then
   begin
     ChosenProjectPath := ProjectPathPage.Values[0];
+
+    // Confirm before reusing a non-empty folder -- easy to pick the same
+    // path as an earlier run by mistake. Message reflects what actually
+    // happens (install_owntech.ps1 is idempotent, never deletes unrelated
+    // content) rather than implying data loss that won't occur.
+    if DirExists(ChosenProjectPath) and (not IsDirEmpty(ChosenProjectPath)) then
+    begin
+      if DirExists(ChosenProjectPath + '\.git') then
+      begin
+        if MsgBox('The folder "' + ChosenProjectPath + '" already has an OwnTech project in it.' + #13#10#13#10 +
+          'Setup will reuse what''s already there and skip any steps already completed.' + #13#10#13#10 +
+          'Continue with this folder?', mbConfirmation, MB_YESNO) = IDNO then
+        begin
+          Result := False;
+          Exit;
+        end;
+      end
+      else
+      begin
+        if MsgBox('The folder "' + ChosenProjectPath + '" already exists and is not empty.' + #13#10#13#10 +
+          'Setup will not delete anything already there, but will create a "Core" subfolder inside it ' +
+          'for the OwnTech project rather than using this folder directly.' + #13#10#13#10 +
+          'Continue with this folder?', mbConfirmation, MB_YESNO) = IDNO then
+        begin
+          Result := False;
+          Exit;
+        end;
+      end;
+    end;
+
     LogFile := ExpandConstant('{tmp}\preflight_log.txt');
     WizardForm.Cursor := crHourglass;
     try
@@ -207,6 +306,10 @@ begin
       MsgBox('This folder can''t be used:' + #13#10#13#10 + FailureMsg, mbError, MB_OK);
       Result := False;
     end;
+  end
+  else if CurPageID = ProgressPage.ID then
+  begin
+    Result := RunAllPhases;
   end;
 end;
 
@@ -231,21 +334,18 @@ begin
   Result := False;
   while Retrying do
   begin
-    StatusLabels[PhaseIndex].Caption := 'Running...';
-    StatusLabels[PhaseIndex].Repaint;
+    SetPhaseVisualState(PhaseIndex, 'running');
     LogFile := ExpandConstant('{tmp}\phase_' + Phases[PhaseIndex].Key + '_log.txt');
     ExitCode := RunPhase(Phases[PhaseIndex].Key, ChosenProjectPath, LogFile);
     if ExitCode = 0 then
     begin
-      StatusLabels[PhaseIndex].Caption := 'Done';
-      StatusLabels[PhaseIndex].Repaint;
+      SetPhaseVisualState(PhaseIndex, 'done');
       Result := True;
       Retrying := False;
     end
     else
     begin
-      StatusLabels[PhaseIndex].Caption := 'Failed';
-      StatusLabels[PhaseIndex].Repaint;
+      SetPhaseVisualState(PhaseIndex, 'failed');
       LogTextRaw := '';
       if FileExists(LogFile) then
         LoadStringFromFile(LogFile, LogTextRaw);
@@ -258,32 +358,43 @@ begin
   end;
 end;
 
-procedure RunAllPhases;
+// Returns True only if every phase eventually succeeded (possibly after
+// retries). Deliberately does NOT try to forcibly terminate Setup itself on
+// failure -- both WizardForm.Close and Abort were tried and neither
+// reliably stopped Setup when called from CurPageChanged (a passive
+// notification callback, not one of Inno Setup's flow-control events) --
+// see windows_installer_plan.md, "Wizard build results", for the full
+// story. Returning False here and having NextButtonClick propagate that is
+// the same well-established mechanism the path page already relies on to
+// block advancement, instead of a special-case termination call.
+function RunAllPhases: Boolean;
 var
   I: Integer;
 begin
+  Result := True;
   for I := 0 to PhaseCount - 1 do
   begin
     if not RunPhaseWithRetry(I) then
     begin
-      // WizardForm.Close alone does NOT abort Setup -- it only closes the
-      // wizard's page navigation; the underlying Setup process then
-      // continues on to its own [Files]/[Run] step and reports success
-      // regardless. Found by actually testing this path (see
-      // windows_installer_plan.md, "Wizard build results"): a forced Git
-      // failure correctly showed Retry/Retry/Cancel, but Setup still
-      // finished with exit 0 afterward. Abort is the real way to terminate.
-      MsgBox('Setup cannot continue without completing this step.', mbError, MB_OK);
-      Abort;
+      MsgBox('Setup cannot continue without completing this step.' + #13#10#13#10 +
+        'Fix the issue above, then click Next to try again.', mbError, MB_OK);
+      Result := False;
+      Exit;
     end;
   end;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  // Auto-starts the checklist the first time this page is reached, by
+  // simulating a Next click -- which routes through NextButtonClick below,
+  // the same reliable path a real click takes. Guarded so this only fires
+  // once: if RunAllPhases returns False, Setup stays on this page (no page
+  // change, so CurPageChanged doesn't fire again) and the user can retry by
+  // clicking Next themselves, which is unaffected by this guard.
   if (CurPageID = ProgressPage.ID) and (not PhasesStarted) then
   begin
     PhasesStarted := True;
-    RunAllPhases;
+    WizardForm.NextButton.OnClick(WizardForm.NextButton);
   end;
 end;
