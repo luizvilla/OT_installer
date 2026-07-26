@@ -676,7 +676,7 @@ function Invoke-BuildSmokeTest($RepoPath) {
 # Main
 # ----------------------------------------------------------------------------
 
-$AllPhases = @('preflight', 'prereqs', 'vscode', 'extensions', 'clone', 'build', 'summary')
+$AllPhases = @('preflight', 'git', 'python', 'cmake', 'vscode', 'extensions', 'clone', 'build', 'summary')
 
 if ($ListPhases) {
     $AllPhases | ForEach-Object { Write-Output $_ }
@@ -737,10 +737,18 @@ function Invoke-PhasePreflight {
     return $state
 }
 
-function Invoke-PhasePrereqs($State) {
-    Write-Phase "Phase 1: Install prerequisites (Git, Python, CMake)"
+function Invoke-PhaseGit($State) {
+    Write-Phase "Phase 1a: Install Git"
     Install-WingetApp -Id 'Git.Git' -DisplayName 'Git' -VerifyCommand 'git'
+}
+
+function Invoke-PhasePython($State) {
+    Write-Phase "Phase 1b: Install Python"
     Install-WingetApp -Id 'Python.Python.3.12' -DisplayName 'Python 3.12' -VerifyCommand 'python' -VerifyScriptBlock { Test-PythonReal }
+}
+
+function Invoke-PhaseCMake($State) {
+    Write-Phase "Phase 1c: Install CMake"
     Install-WingetApp -Id 'Kitware.CMake' -DisplayName 'CMake' -VerifyCommand 'cmake'
 }
 
@@ -821,7 +829,9 @@ if ($RunPhase) {
     }
     switch ($RunPhase) {
         'preflight'  { Invoke-PhasePreflight | Out-Null }
-        'prereqs'    { Invoke-PhasePrereqs $state }
+        'git'        { Invoke-PhaseGit $state }
+        'python'     { Invoke-PhasePython $state }
+        'cmake'      { Invoke-PhaseCMake $state }
         'vscode'     { Invoke-PhaseVSCode $state }
         'extensions' { Invoke-PhaseExtensions $state }
         'clone'      { Invoke-PhaseClone $state }
@@ -834,7 +844,9 @@ if ($RunPhase) {
 # Default: no -RunPhase, run every phase in order in this one process --
 # behavior identical to how this script has always worked.
 $state = Invoke-PhasePreflight
-Invoke-PhasePrereqs $state
+Invoke-PhaseGit $state
+Invoke-PhasePython $state
+Invoke-PhaseCMake $state
 Invoke-PhaseVSCode $state
 Invoke-PhaseExtensions $state
 Invoke-PhaseClone $state
