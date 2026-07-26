@@ -84,6 +84,59 @@ function Test-Cmd($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Invoke-WithRetry {
+    # Absorbs transient network blips (a dropped connection, a momentary DNS
+    # hiccup) without requiring the user to notice a failure and manually
+    # re-run the whole script. $Action must throw on failure -- for native
+    # commands (git, etc.) that signal failure via $LASTEXITCODE instead of an
+    # exception, the caller's scriptblock must check it and throw itself. Not
+    # used for extraction/build steps: those failing is more likely a real
+    # problem (corrupt download, disk space) than a transient blip, and
+    # retrying them blindly would just waste time or mask the real error.
+    param(
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [string]$Description = 'operation',
+        [int]$MaxAttempts = 3,
+        [int]$InitialDelaySeconds = 2
+    )
+    $attempt = 1
+    $delay = $InitialDelaySeconds
+    while ($true) {
+        try {
+            & $Action
+            return
+        } catch {
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+            Write-Warn "$Description failed (attempt $attempt/$MaxAttempts): $($_.Exception.Message). Retrying in ${delay}s..."
+            Start-Sleep -Seconds $delay
+            $attempt++
+            $delay *= 2
+        }
+    }
+}
+
+function Install-VSCodeExtension($Id, $DisplayName, [switch]$Required) {
+    $hasExtension = (code --list-extensions 2>$null) -contains $Id
+    if ($hasExtension) {
+        Write-Ok "$DisplayName extension already installed."
+        return
+    }
+    Write-Info "Installing $DisplayName extension..."
+    code --install-extension $Id --force | Out-Null
+    $hasExtension = (code --list-extensions 2>$null) -contains $Id
+    if (-not $hasExtension) {
+        if ($Required) {
+            Stop-Install "$DisplayName extension did not appear in 'code --list-extensions' after install." `
+                "Open VS Code, go to Extensions, and install '$DisplayName' manually, then re-run this script."
+        }
+        Write-Warn "$DisplayName extension did not appear in 'code --list-extensions' after install -- continuing without it (not required for the build)."
+        return
+    }
+    Write-Ok "$DisplayName extension installed."
+}
+
 function Test-PythonReal {
     # On many Windows 10/11 machines, 'python' resolves to the Microsoft Store
     # "App execution alias" stub (%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe)
@@ -259,7 +312,9 @@ function Get-SevenZipTool {
     $nupkgUrl = 'https://www.nuget.org/api/v2/package/7-Zip.CommandLine/25.1.0'
     $nupkgPath = Join-Path $env:TEMP 'owntech_7zip_cmdline.zip'
     try {
-        Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkgPath -UseBasicParsing -ErrorAction Stop
+        Invoke-WithRetry -Description "7za.exe download" -Action {
+            Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkgPath -UseBasicParsing -ErrorAction Stop
+        }
         New-Item -ItemType Directory -Path $toolsDir -Force -ErrorAction SilentlyContinue | Out-Null
         Expand-Archive -Path $nupkgPath -DestinationPath $toolsDir -Force -ErrorAction Stop
     } catch {
@@ -302,7 +357,9 @@ function Invoke-BundleSeed($BundleUrl, $BundleSha256, $CoreDir) {
     Write-Info "Downloading pre-baked PlatformIO package bundle (avoids fetching the full toolchain/framework set from scratch)..."
     $zipPath = Join-Path $env:TEMP 'platformio_bundle.zip'
     try {
-        Invoke-WebRequest -Uri $BundleUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+        Invoke-WithRetry -Description "package bundle download" -Action {
+            Invoke-WebRequest -Uri $BundleUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+        }
     } catch {
         Write-Warn "Could not download package bundle ($($_.Exception.Message)) -- falling back to a full download during the build."
         return
@@ -396,16 +453,51 @@ function Get-RepoPath($ProjectPath) {
     return $ProjectPath
 }
 
+function Test-CompleteClone($RepoPath) {
+    # A .git folder existing isn't proof of a complete clone -- an interrupted
+    # 'git clone' can leave one behind with a corrupt/incomplete object
+    # database. 'git rev-parse HEAD' only succeeds if at least one real commit
+    # is actually resolvable, a much stronger signal than the folder's mere
+    # presence.
+    if (-not (Test-Path (Join-Path $RepoPath '.git'))) {
+        return $false
+    }
+    Push-Location $RepoPath
+    try {
+        git rev-parse HEAD 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Pop-Location
+    }
+}
+
 function Invoke-CloneCore($RepoPath) {
     $repoUrl = 'https://github.com/owntech-foundation/Core'
 
-    if (Test-Path (Join-Path $RepoPath '.git')) {
+    $hasGitFolder = Test-Path (Join-Path $RepoPath '.git')
+    if ($hasGitFolder -and (Test-CompleteClone $RepoPath)) {
         Write-Ok "Core repository already cloned at $RepoPath, skipping clone."
     } else {
+        if ($hasGitFolder) {
+            # git can't resume a partial clone cleanly -- the correct recovery
+            # from an interrupted previous run is to discard it and start
+            # over, not to leave the user to diagnose a cryptic branch error.
+            Write-Warn "Found an incomplete or corrupted clone at $RepoPath (likely from an interrupted previous run) -- removing it and re-cloning."
+        }
         Write-Info "Cloning $repoUrl into $RepoPath ..."
-        git clone $repoUrl $RepoPath
-        if ($LASTEXITCODE -ne 0) {
-            Stop-Install "git clone failed (exit code $LASTEXITCODE)." `
+        try {
+            Invoke-WithRetry -Description "git clone" -Action {
+                # Clear any partial state before each attempt -- 'git clone'
+                # refuses to write into a non-empty directory, which a prior
+                # failed attempt (in this loop or a previous run) can leave.
+                Remove-Item $RepoPath -Recurse -Force -ErrorAction SilentlyContinue
+                git clone $repoUrl $RepoPath
+                if ($LASTEXITCODE -ne 0) {
+                    throw "git clone exited with code $LASTEXITCODE"
+                }
+            }
+        } catch {
+            Stop-Install "git clone failed ($($_.Exception.Message))." `
                 "Check your internet connection and that $RepoPath doesn't already contain conflicting files, then re-run this script."
         }
         Write-Ok "Cloned into $RepoPath."
@@ -476,8 +568,10 @@ function Invoke-BuildSmokeTest($RepoPath) {
         Write-Info "Bootstrapping PlatformIO Core into $coreDir (same layout the VS Code extension expects, so it won't redo this)..."
         $getPlatformioScript = Join-Path $env:TEMP 'get-platformio.py'
         try {
-            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/platformio/platformio-core-installer/master/get-platformio.py' `
-                -OutFile $getPlatformioScript -UseBasicParsing -ErrorAction Stop
+            Invoke-WithRetry -Description "get-platformio.py download" -Action {
+                Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/platformio/platformio-core-installer/master/get-platformio.py' `
+                    -OutFile $getPlatformioScript -UseBasicParsing -ErrorAction Stop
+            }
         } catch {
             Stop-Install "Failed to download the PlatformIO Core bootstrap script." `
                 "Check your internet connection, then re-run this script."
@@ -580,19 +674,11 @@ Install-WingetApp -Id 'Microsoft.VisualStudioCode' -DisplayName 'Visual Studio C
 # --- Phase 3: PlatformIO extension ---
 Write-Phase "Phase 3: Install PlatformIO IDE extension"
 
-$hasExtension = (code --list-extensions 2>$null) -contains 'platformio.platformio-ide'
-if ($hasExtension) {
-    Write-Ok "PlatformIO IDE extension already installed."
-} else {
-    Write-Info "Installing PlatformIO IDE extension..."
-    code --install-extension platformio.platformio-ide --force | Out-Null
-    $hasExtension = (code --list-extensions 2>$null) -contains 'platformio.platformio-ide'
-    if (-not $hasExtension) {
-        Stop-Install "PlatformIO IDE extension did not appear in 'code --list-extensions' after install." `
-            "Open VS Code, go to Extensions, and install 'PlatformIO IDE' manually, then re-run this script."
-    }
-    Write-Ok "PlatformIO IDE extension installed."
-}
+Install-VSCodeExtension -Id 'platformio.platformio-ide' -DisplayName 'PlatformIO IDE' -Required
+# Not build-critical -- failing to install either of these shouldn't stop the
+# rest of setup, unlike PlatformIO IDE itself.
+Install-VSCodeExtension -Id 'shd101wyy.markdown-preview-enhanced' -DisplayName 'Markdown Preview Enhanced'
+Install-VSCodeExtension -Id 'mhutchie.git-graph' -DisplayName 'Git Graph'
 
 # --- Phase 4: Clone Core ---
 Write-Phase "Phase 4: Clone the Core repository"

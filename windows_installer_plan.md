@@ -858,6 +858,48 @@ it: `shd101wyy.markdown-preview-enhanced` and `mhutchie.git-graph`, installed an
 Not yet implemented at the time this was written — see the next section for results once the above is
 built and run.
 
+#### Phase 3/4/5 hardening + test suite — implemented and verified (2026-07-26)
+
+All three hardening items and the test suite from the design above are implemented in
+`install_owntech.ps1` and `test_hardening.ps1`:
+
+- `Test-CompleteClone` (`git rev-parse HEAD` must succeed, not just `.git` existing) gates
+  `Invoke-CloneCore`'s "already cloned, skip" path; an incomplete/corrupt clone is now detected and
+  auto-healed (removed and re-cloned) instead of surfacing a misleading "wrong branch" error.
+- `Invoke-WithRetry` (3 attempts, 2s/4s exponential backoff) wraps every network call in the script: the
+  bundle zip download, `get-platformio.py`, the 7za NuGet fetch, and `git clone` (which also clears any
+  partial destination directory before each attempt, since `git clone` refuses to write into a non-empty
+  one).
+- `Install-VSCodeExtension` (refactored out of the existing PlatformIO-extension logic) now also installs
+  `shd101wyy.markdown-preview-enhanced` and `mhutchie.git-graph` in Phase 3, both non-blocking (`-Required`
+  only set for `platformio.platformio-ide` — a failed install of either new extension warns and continues
+  rather than stopping the whole install).
+
+`test_hardening.ps1` (new file) ran clean on the first attempt, 5/5 passed:
+
+| Test | Result |
+|---|---|
+| Bad path: contains a space | PASS (exit 1, correct reason) |
+| Bad path: ≥256 characters | PASS (exit 1, correct reason) |
+| Bad path: contains "OneDrive" | PASS (exit 1, correct reason) |
+| Transient network outage, recovered by retry | PASS (no exception, content correctly extracted, 6.0s elapsed — consistent with a retry actually firing, not an instant single-attempt success) |
+| Sustained network outage, retries exhausted | PASS (no exception, no partial state left behind, 22.4s elapsed — consistent with all 3 attempts + backoff actually running, not failing instantly) |
+
+The bad-path tests spawn `install_owntech.ps1` as a real child process (`Stop-Install` calls `exit 1` on
+the whole process by design, so these can't be tested by dot-sourcing into the same session without
+killing the test runner after the first case) and assert on exit code + expected failure text — this also
+happens to exercise the actual invocation path a real user hits, not just the bare function. The network
+tests dot-source the script's functions directly and drive a local HTTP server that gets killed and (for
+the "recovered" case) restarted on a timer via a background job, since a real network connection can't be
+told to misbehave on command. Sanity-checked that the "recovered" test's ~6s elapsed wasn't just a fresh
+7za.exe download masquerading as retry time — confirmed the cached copy's containing folder predated this
+test run by hours, so the elapsed time is genuinely attributable to the retry backoff.
+
+No corrections were needed — everything passed on the first run. `test_hardening.ps1` is safe to re-run at
+any time; it only touches isolated temp directories (`Test-ProjectPath` failures never get far enough to
+touch disk, and the network tests use throwaway `CoreDir`s under `$env:TEMP`), never `D:\owntech` or
+`D:\.platformio_core`.
+
 ## Open decisions
 
 - Distribution: plain script users download and run, vs. a signed `.exe` wrapper — defer until the
@@ -927,8 +969,9 @@ directions, either is reasonable to pick up next:
    best-evidenced performance win found this session (23% faster total install), but currently requires
    the user to add it manually outside the script.
 2. **Close out the original test matrix** — Windows 10 (never actually tested; this machine is Windows
-   11), deliberately-bad paths (OneDrive/spaces/length — Phase 0's validation logic exists but hasn't
-   been exercised against real bad inputs), and an interrupted-network scenario.
+   11), ~~deliberately-bad paths (OneDrive/spaces/length...) and an interrupted-network scenario~~ — done,
+   2026-07-26: see "Phase 3/4/5 hardening + test suite" near the end of this doc (`test_hardening.ps1`,
+   5/5 passed). Windows 10 remains the one item in this list still genuinely untested.
 
 Use `reset_environment.ps1` (now supports `-NonInteractive -ProjectPath <path> -IncludePython`) or
 `run_timed_install_test.ps1` to reset between attempts. Check free disk space on both C: and D: before
