@@ -614,45 +614,78 @@ function Set-VSCodeAutoRebuildSetting($RepoPath) {
 # Phase 5 - Smoke-test build
 # ----------------------------------------------------------------------------
 
-function Invoke-BuildSmokeTest($RepoPath) {
-    $coreDir = Get-PlatformIOCoreDir
-    $pioExe = Join-Path $coreDir 'penv\Scripts\platformio.exe'
+function Get-CoreDirForPhase($State) {
+    # -RunPhase invocations may run in a fresh process where $env:PLATFORMIO_CORE_DIR
+    # isn't reliably inherited (e.g. a wizard's own process snapshot predates
+    # preflight's registry write) -- prefer the persisted state, which is
+    # always correct regardless of process history, over recomputing live.
+    if ($State.CoreDir) { return $State.CoreDir }
+    return Get-PlatformIOCoreDir
+}
 
+function Invoke-PhaseBundleFetch($State) {
+    if ($SkipBuildTest) {
+        Write-Phase "Phase 5a: Fetch package bundle (skipped via -SkipBuildTest)"
+        return
+    }
+    Write-Phase "Phase 5a: Fetch package bundle"
+    $coreDir = Get-CoreDirForPhase $State
     Invoke-BundleSeed -BundleUrl $BundleUrl -BundleSha256 $BundleSha256 -CoreDir $coreDir
+}
+
+function Invoke-PhaseBootstrap($State) {
+    if ($SkipBuildTest) {
+        Write-Phase "Phase 5b: Bootstrap PlatformIO Core (skipped via -SkipBuildTest)"
+        return
+    }
+    Write-Phase "Phase 5b: Bootstrap PlatformIO Core"
+    $coreDir = Get-CoreDirForPhase $State
+    $pioExe = Join-Path $coreDir 'penv\Scripts\platformio.exe'
 
     if (Test-Path $pioExe) {
         Write-Ok "PlatformIO Core already bootstrapped at $coreDir, skipping."
-    } else {
-        # Use the same get-platformio.py bootstrap the VS Code extension itself
-        # uses -- it creates a self-contained venv at <core dir>\penv. A plain
-        # 'pip install platformio' builds fine but does NOT create that layout,
-        # so the extension doesn't recognize it as done and reinstalls its own
-        # copy from scratch when the folder is opened. Bootstrapping it here
-        # the same way means VS Code finds it already in place afterward.
-        Write-Info "Bootstrapping PlatformIO Core into $coreDir (same layout the VS Code extension expects, so it won't redo this)..."
-        $getPlatformioScript = Join-Path $env:TEMP 'get-platformio.py'
-        try {
-            Invoke-WithRetry -Description "get-platformio.py download" -Action {
-                Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/platformio/platformio-core-installer/master/get-platformio.py' `
-                    -OutFile $getPlatformioScript -UseBasicParsing -ErrorAction Stop
-            }
-        } catch {
-            Stop-Install "Failed to download the PlatformIO Core bootstrap script." `
-                "Check your internet connection, then re-run this script."
-        }
-
-        python $getPlatformioScript
-        $bootstrapExit = $LASTEXITCODE
-
-        if ($bootstrapExit -ne 0 -or -not (Test-Path $pioExe)) {
-            Stop-Install "PlatformIO Core bootstrap failed (exit code $bootstrapExit)." `
-                "Check your internet connection, then re-run this script (or re-run with -SkipBuildTest to skip this check)."
-        }
-        Write-Ok "PlatformIO Core bootstrapped at $coreDir."
+        return
     }
 
-    Write-Info "Running first build in $RepoPath (this downloads toolchains/framework packages on first run, can take several minutes)..."
-    Push-Location $RepoPath
+    # Use the same get-platformio.py bootstrap the VS Code extension itself
+    # uses -- it creates a self-contained venv at <core dir>\penv. A plain
+    # 'pip install platformio' builds fine but does NOT create that layout,
+    # so the extension doesn't recognize it as done and reinstalls its own
+    # copy from scratch when the folder is opened. Bootstrapping it here the
+    # same way means VS Code finds it already in place afterward.
+    Write-Info "Bootstrapping PlatformIO Core into $coreDir (same layout the VS Code extension expects, so it won't redo this)..."
+    $getPlatformioScript = Join-Path $env:TEMP 'get-platformio.py'
+    try {
+        Invoke-WithRetry -Description "get-platformio.py download" -Action {
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/platformio/platformio-core-installer/master/get-platformio.py' `
+                -OutFile $getPlatformioScript -UseBasicParsing -ErrorAction Stop
+        }
+    } catch {
+        Stop-Install "Failed to download the PlatformIO Core bootstrap script." `
+            "Check your internet connection, then re-run this script."
+    }
+
+    python $getPlatformioScript
+    $bootstrapExit = $LASTEXITCODE
+
+    if ($bootstrapExit -ne 0 -or -not (Test-Path $pioExe)) {
+        Stop-Install "PlatformIO Core bootstrap failed (exit code $bootstrapExit)." `
+            "Check your internet connection, then re-run this script (or re-run with -SkipBuildTest to skip this check)."
+    }
+    Write-Ok "PlatformIO Core bootstrapped at $coreDir."
+}
+
+function Invoke-PhaseBuildFirmware($State) {
+    if ($SkipBuildTest) {
+        Write-Phase "Phase 5c: Build firmware (skipped via -SkipBuildTest)"
+        return
+    }
+    Write-Phase "Phase 5c: Build firmware"
+    $coreDir = Get-CoreDirForPhase $State
+    $pioExe = Join-Path $coreDir 'penv\Scripts\platformio.exe'
+
+    Write-Info "Running first build in $($State.RepoPath) (this downloads toolchains/framework packages on first run, can take several minutes)..."
+    Push-Location $State.RepoPath
     try {
         $buildOutput = & $pioExe run 2>&1
         $buildExit = $LASTEXITCODE
@@ -676,7 +709,7 @@ function Invoke-BuildSmokeTest($RepoPath) {
 # Main
 # ----------------------------------------------------------------------------
 
-$AllPhases = @('preflight', 'git', 'python', 'cmake', 'vscode', 'extensions', 'clone', 'build', 'summary')
+$AllPhases = @('preflight', 'git', 'python', 'cmake', 'vscode', 'extensions', 'clone', 'bundle', 'bootstrap', 'build', 'summary')
 
 if ($ListPhases) {
     $AllPhases | ForEach-Object { Write-Output $_ }
@@ -774,15 +807,6 @@ function Invoke-PhaseClone($State) {
     Save-InstallState -ProjectPath $State.ProjectPath -State $State
 }
 
-function Invoke-PhaseBuild($State) {
-    if ($SkipBuildTest) {
-        Write-Phase "Phase 5: Smoke-test build (skipped via -SkipBuildTest)"
-        return
-    }
-    Write-Phase "Phase 5: Smoke-test build"
-    Invoke-BuildSmokeTest -RepoPath $State.RepoPath
-}
-
 function Invoke-PhaseSummary($State) {
     Write-Phase "Phase 6: Summary"
 
@@ -835,7 +859,9 @@ if ($RunPhase) {
         'vscode'     { Invoke-PhaseVSCode $state }
         'extensions' { Invoke-PhaseExtensions $state }
         'clone'      { Invoke-PhaseClone $state }
-        'build'      { Invoke-PhaseBuild $state }
+        'bundle'     { Invoke-PhaseBundleFetch $state }
+        'bootstrap'  { Invoke-PhaseBootstrap $state }
+        'build'      { Invoke-PhaseBuildFirmware $state }
         'summary'    { Invoke-PhaseSummary $state }
     }
     exit 0
@@ -850,5 +876,7 @@ Invoke-PhaseCMake $state
 Invoke-PhaseVSCode $state
 Invoke-PhaseExtensions $state
 Invoke-PhaseClone $state
-Invoke-PhaseBuild $state
+Invoke-PhaseBundleFetch $state
+Invoke-PhaseBootstrap $state
+Invoke-PhaseBuildFirmware $state
 Invoke-PhaseSummary $state
