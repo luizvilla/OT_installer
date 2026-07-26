@@ -30,7 +30,18 @@ param(
     # run on a given machine; every run after that reuses its own local cache
     # regardless.
     [string]$BundleUrl,
-    [string]$BundleSha256
+    [string]$BundleSha256,
+    # Run a single named phase in isolation instead of the full sequence --
+    # for a future GUI wizard driving one progress bar per phase (see
+    # windows_installer_plan.md, "Per-phase refactor implementation plan").
+    # -ProjectPath is required with this (except for 'preflight', which is
+    # what resolves it in the first place) since each invocation is a fresh
+    # process with no memory of a prior phase's choices -- state is instead
+    # read from/written to <ProjectPath>\.owntech_install_state.json.
+    # Omitting -RunPhase runs every phase in order in one process, exactly
+    # as this script has always worked.
+    [string]$RunPhase,
+    [switch]$ListPhases
 )
 
 $ErrorActionPreference = 'Continue'
@@ -665,128 +676,167 @@ function Invoke-BuildSmokeTest($RepoPath) {
 # Main
 # ----------------------------------------------------------------------------
 
-Write-Host "===================================================" -ForegroundColor Cyan
-Write-Host " OwnTech environment installer" -ForegroundColor Cyan
-Write-Host "===================================================" -ForegroundColor Cyan
+$AllPhases = @('preflight', 'prereqs', 'vscode', 'extensions', 'clone', 'build', 'summary')
 
-$installed = [ordered]@{}
-
-# --- Phase 0: Preflight ---
-Write-Phase "Phase 0: Preflight"
-
-# Refresh PATH before detecting existing components: the process that launched
-# this script may hold a stale PATH from before an earlier run (or an earlier
-# manual install) updated the registry, which would otherwise make an
-# already-installed tool look missing in the summary below.
-Update-SessionPath
-
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Warn "Not running as Administrator. Machine-wide installs (Git, VS Code, CMake) may trigger individual UAC prompts. For a smoother run, re-launch PowerShell as Administrator."
+if ($ListPhases) {
+    $AllPhases | ForEach-Object { Write-Output $_ }
+    exit 0
 }
 
-Test-WindowsVersion
-Test-WingetAvailable
+function Invoke-PhasePreflight {
+    Write-Host "===================================================" -ForegroundColor Cyan
+    Write-Host " OwnTech environment installer" -ForegroundColor Cyan
+    Write-Host "===================================================" -ForegroundColor Cyan
 
-$resolvedProjectPath = Get-ProjectPath
-Test-DiskSpace -Path $resolvedProjectPath -MinimumGB 5
-Test-ProjectPath -Path $resolvedProjectPath
-Set-PlatformIOCoreDir -ProjectPath $resolvedProjectPath
+    Write-Phase "Phase 0: Preflight"
 
-if (-not (Test-Path $resolvedProjectPath)) {
-    New-Item -ItemType Directory -Path $resolvedProjectPath -Force -ErrorAction SilentlyContinue | Out-Null
+    # Refresh PATH before detecting existing components: the process that
+    # launched this script may hold a stale PATH from before an earlier run
+    # (or an earlier manual install) updated the registry, which would
+    # otherwise make an already-installed tool look missing in the summary.
+    Update-SessionPath
+
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Warn "Not running as Administrator. Machine-wide installs (Git, VS Code, CMake) may trigger individual UAC prompts. For a smoother run, re-launch PowerShell as Administrator."
+    }
+
+    Test-WindowsVersion
+    Test-WingetAvailable
+
+    $resolvedProjectPath = Get-ProjectPath
+    Test-DiskSpace -Path $resolvedProjectPath -MinimumGB 5
+    Test-ProjectPath -Path $resolvedProjectPath
+    Set-PlatformIOCoreDir -ProjectPath $resolvedProjectPath
+
     if (-not (Test-Path $resolvedProjectPath)) {
-        Stop-Install "Could not create project folder $resolvedProjectPath." `
-            "Check that you have write permission to this location, then re-run this script."
+        New-Item -ItemType Directory -Path $resolvedProjectPath -Force -ErrorAction SilentlyContinue | Out-Null
+        if (-not (Test-Path $resolvedProjectPath)) {
+            Stop-Install "Could not create project folder $resolvedProjectPath." `
+                "Check that you have write permission to this location, then re-run this script."
+        }
+        Write-Ok "Created project folder $resolvedProjectPath."
+    } else {
+        Write-Ok "Project folder $resolvedProjectPath already exists."
     }
-    Write-Ok "Created project folder $resolvedProjectPath."
-} else {
-    Write-Ok "Project folder $resolvedProjectPath already exists."
+
+    $installed = [ordered]@{}
+    $installed['git'] = Test-Cmd 'git'
+    $installed['python'] = Test-PythonReal
+    $installed['cmake'] = Test-Cmd 'cmake'
+    $installed['code'] = Test-Cmd 'code'
+    foreach ($k in $installed.Keys) {
+        if ($installed[$k]) { Write-Ok "$k already detected on PATH." }
+    }
+
+    $state = Get-InstallState -ProjectPath $resolvedProjectPath
+    $state.ProjectPath = $resolvedProjectPath
+    $state.CoreDir = Get-PlatformIOCoreDir
+    $state.Installed = $installed
+    Save-InstallState -ProjectPath $resolvedProjectPath -State $state
+    return $state
 }
 
-$installed['git'] = Test-Cmd 'git'
-$installed['python'] = Test-PythonReal
-$installed['cmake'] = Test-Cmd 'cmake'
-$installed['code'] = Test-Cmd 'code'
-foreach ($k in $installed.Keys) {
-    if ($installed[$k]) { Write-Ok "$k already detected on PATH." }
+function Invoke-PhasePrereqs($State) {
+    Write-Phase "Phase 1: Install prerequisites (Git, Python, CMake)"
+    Install-WingetApp -Id 'Git.Git' -DisplayName 'Git' -VerifyCommand 'git'
+    Install-WingetApp -Id 'Python.Python.3.12' -DisplayName 'Python 3.12' -VerifyCommand 'python' -VerifyScriptBlock { Test-PythonReal }
+    Install-WingetApp -Id 'Kitware.CMake' -DisplayName 'CMake' -VerifyCommand 'cmake'
 }
 
-# Persisted for a future -RunPhase mode (see windows_installer_plan.md,
-# "Per-phase refactor implementation plan") -- not read back anywhere yet,
-# so this has no effect on the behavior below.
-$installState = Get-InstallState -ProjectPath $resolvedProjectPath
-$installState.ProjectPath = $resolvedProjectPath
-$installState.CoreDir = Get-PlatformIOCoreDir
-$installState.Installed = $installed
-Save-InstallState -ProjectPath $resolvedProjectPath -State $installState
+function Invoke-PhaseVSCode($State) {
+    Write-Phase "Phase 2: Install Visual Studio Code"
+    Install-WingetApp -Id 'Microsoft.VisualStudioCode' -DisplayName 'Visual Studio Code' -VerifyCommand 'code'
+}
 
-# --- Phase 1: Prerequisites ---
-Write-Phase "Phase 1: Install prerequisites (Git, Python, CMake)"
+function Invoke-PhaseExtensions($State) {
+    Write-Phase "Phase 3: Install PlatformIO IDE extension"
+    Install-VSCodeExtension -Id 'platformio.platformio-ide' -DisplayName 'PlatformIO IDE' -Required
+    # Not build-critical -- failing to install either of these shouldn't stop
+    # the rest of setup, unlike PlatformIO IDE itself.
+    Install-VSCodeExtension -Id 'shd101wyy.markdown-preview-enhanced' -DisplayName 'Markdown Preview Enhanced'
+    Install-VSCodeExtension -Id 'mhutchie.git-graph' -DisplayName 'Git Graph'
+}
 
-Install-WingetApp -Id 'Git.Git' -DisplayName 'Git' -VerifyCommand 'git'
-Install-WingetApp -Id 'Python.Python.3.12' -DisplayName 'Python 3.12' -VerifyCommand 'python' -VerifyScriptBlock { Test-PythonReal }
-Install-WingetApp -Id 'Kitware.CMake' -DisplayName 'CMake' -VerifyCommand 'cmake'
+function Invoke-PhaseClone($State) {
+    Write-Phase "Phase 4: Clone the Core repository"
+    $repoPath = Get-RepoPath -ProjectPath $State.ProjectPath
+    Invoke-CloneCore -RepoPath $repoPath
+    $State.RepoPath = $repoPath
+    Save-InstallState -ProjectPath $State.ProjectPath -State $State
+}
 
-# --- Phase 2: VS Code ---
-Write-Phase "Phase 2: Install Visual Studio Code"
-
-Install-WingetApp -Id 'Microsoft.VisualStudioCode' -DisplayName 'Visual Studio Code' -VerifyCommand 'code'
-
-# --- Phase 3: PlatformIO extension ---
-Write-Phase "Phase 3: Install PlatformIO IDE extension"
-
-Install-VSCodeExtension -Id 'platformio.platformio-ide' -DisplayName 'PlatformIO IDE' -Required
-# Not build-critical -- failing to install either of these shouldn't stop the
-# rest of setup, unlike PlatformIO IDE itself.
-Install-VSCodeExtension -Id 'shd101wyy.markdown-preview-enhanced' -DisplayName 'Markdown Preview Enhanced'
-Install-VSCodeExtension -Id 'mhutchie.git-graph' -DisplayName 'Git Graph'
-
-# --- Phase 4: Clone Core ---
-Write-Phase "Phase 4: Clone the Core repository"
-
-$repoPath = Get-RepoPath -ProjectPath $resolvedProjectPath
-Invoke-CloneCore -RepoPath $repoPath
-
-# Same as above -- not yet read back anywhere, no behavior change.
-$installState.RepoPath = $repoPath
-Save-InstallState -ProjectPath $resolvedProjectPath -State $installState
-
-# --- Phase 5: Smoke-test build ---
-if ($SkipBuildTest) {
-    Write-Phase "Phase 5: Smoke-test build (skipped via -SkipBuildTest)"
-} else {
+function Invoke-PhaseBuild($State) {
+    if ($SkipBuildTest) {
+        Write-Phase "Phase 5: Smoke-test build (skipped via -SkipBuildTest)"
+        return
+    }
     Write-Phase "Phase 5: Smoke-test build"
-    Invoke-BuildSmokeTest -RepoPath $repoPath
+    Invoke-BuildSmokeTest -RepoPath $State.RepoPath
 }
 
-# --- Phase 6: Wrap-up ---
-Write-Phase "Phase 6: Summary"
+function Invoke-PhaseSummary($State) {
+    Write-Phase "Phase 6: Summary"
 
-$script:InstallStopwatch.Stop()
-$totalElapsed = $script:InstallStopwatch.Elapsed.ToString('hh\:mm\:ss')
+    $script:InstallStopwatch.Stop()
+    $totalElapsed = $script:InstallStopwatch.Elapsed.ToString('hh\:mm\:ss')
 
-Write-Host ""
-Write-Host "Setup complete." -ForegroundColor Green
-Write-Host ""
-Write-Host "  Total install time: $totalElapsed"
-Write-Host "  Project folder: $repoPath"
-Write-Host ""
-Write-Host "  Component status:"
-foreach ($k in $installed.Keys) {
-    $status = if ($installed[$k]) { 'already present' } else { 'installed by this script' }
-    Write-Host "    - $k`: $status"
-}
-Write-Host ""
-Write-Host "  Remaining manual steps:"
-Write-Host "    1. Connect your SPIN board via USB-C (its PWR LED should light up)."
-Write-Host "    2. In VS Code, use the Build (check mark) icon in the status bar."
-Write-Host "    3. Then Upload (arrow icon) to flash the board and see the LED blink."
-Write-Host ""
+    Write-Host ""
+    Write-Host "Setup complete." -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Total install time: $totalElapsed"
+    Write-Host "  Project folder: $($State.RepoPath)"
+    Write-Host ""
+    Write-Host "  Component status:"
+    foreach ($k in $State.Installed.Keys) {
+        $status = if ($State.Installed[$k]) { 'already present' } else { 'installed by this script' }
+        Write-Host "    - $k`: $status"
+    }
+    Write-Host ""
+    Write-Host "  Remaining manual steps:"
+    Write-Host "    1. Connect your SPIN board via USB-C (its PWR LED should light up)."
+    Write-Host "    2. In VS Code, use the Build (check mark) icon in the status bar."
+    Write-Host "    3. Then Upload (arrow icon) to flash the board and see the LED blink."
+    Write-Host ""
 
-if (-not $NonInteractive) {
-    $openCode = Read-Host "Open the project in VS Code now? [Y/n]"
-    if ($openCode -notmatch '^[Nn]') {
-        code $repoPath
+    if (-not $NonInteractive) {
+        $openCode = Read-Host "Open the project in VS Code now? [Y/n]"
+        if ($openCode -notmatch '^[Nn]') {
+            code $State.RepoPath
+        }
     }
 }
+
+if ($RunPhase) {
+    if ($AllPhases -notcontains $RunPhase) {
+        Write-Host "Unknown phase '$RunPhase'. Valid phases: $($AllPhases -join ', ')" -ForegroundColor Red
+        exit 1
+    }
+    if ($RunPhase -ne 'preflight') {
+        if (-not $ProjectPath) {
+            Write-Host "-ProjectPath is required with -RunPhase $RunPhase (only 'preflight' can resolve/prompt for it)." -ForegroundColor Red
+            exit 1
+        }
+        $state = Get-InstallState -ProjectPath $ProjectPath
+    }
+    switch ($RunPhase) {
+        'preflight'  { Invoke-PhasePreflight | Out-Null }
+        'prereqs'    { Invoke-PhasePrereqs $state }
+        'vscode'     { Invoke-PhaseVSCode $state }
+        'extensions' { Invoke-PhaseExtensions $state }
+        'clone'      { Invoke-PhaseClone $state }
+        'build'      { Invoke-PhaseBuild $state }
+        'summary'    { Invoke-PhaseSummary $state }
+    }
+    exit 0
+}
+
+# Default: no -RunPhase, run every phase in order in this one process --
+# behavior identical to how this script has always worked.
+$state = Invoke-PhasePreflight
+Invoke-PhasePrereqs $state
+Invoke-PhaseVSCode $state
+Invoke-PhaseExtensions $state
+Invoke-PhaseClone $state
+Invoke-PhaseBuild $state
+Invoke-PhaseSummary $state
