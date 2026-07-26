@@ -53,12 +53,71 @@ Source: "..\install_owntech.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 ; Nothing to run yet -- real phase execution gets wired in step 4.
 
 [Code]
+const
+  // Same 9 rows as "GUI wizard design"/"Wizard build plan" in
+  // windows_installer_plan.md. 'preflight' already ran on the path page;
+  // 'summary' becomes the Completion page's own content -- neither gets a
+  // checklist row here.
+  PhaseCount = 9;
+
+type
+  TPhaseInfo = record
+    Key: String;   // -RunPhase value
+    Label_: String; // display text (Label is a reserved word)
+  end;
+
 var
   ProjectPathPage: TInputDirWizardPage;
   ChosenProjectPath: String;
+  ProgressPage: TWizardPage;
+  Phases: array[0..PhaseCount - 1] of TPhaseInfo;
+  StatusLabels: array[0..PhaseCount - 1] of TNewStaticText;
+
+procedure InitPhaseList;
+begin
+  Phases[0].Key := 'git';         Phases[0].Label_ := 'Git';
+  Phases[1].Key := 'python';      Phases[1].Label_ := 'Python';
+  Phases[2].Key := 'cmake';       Phases[2].Label_ := 'CMake';
+  Phases[3].Key := 'vscode';      Phases[3].Label_ := 'Visual Studio Code';
+  Phases[4].Key := 'extensions';  Phases[4].Label_ := 'VS Code extensions';
+  Phases[5].Key := 'clone';       Phases[5].Label_ := 'Clone OwnTech Core';
+  Phases[6].Key := 'bundle';      Phases[6].Label_ := 'Fetch package bundle';
+  Phases[7].Key := 'bootstrap';   Phases[7].Label_ := 'Bootstrap PlatformIO Core';
+  Phases[8].Key := 'build';       Phases[8].Label_ := 'Build firmware';
+end;
+
+procedure CreateProgressPage;
+var
+  I: Integer;
+  NameLabel: TNewStaticText;
+  RowTop: Integer;
+begin
+  ProgressPage := CreateCustomPage(ProjectPathPage.ID, 'Installing OwnTech',
+    'Each step below runs on its own -- seeing them complete one at a time is the point, ' +
+    'not a single bar stuck for several minutes.');
+  for I := 0 to PhaseCount - 1 do
+  begin
+    RowTop := I * 24;
+    NameLabel := TNewStaticText.Create(ProgressPage);
+    NameLabel.Parent := ProgressPage.Surface;
+    NameLabel.Left := 0;
+    NameLabel.Top := RowTop;
+    NameLabel.Width := 220;
+    NameLabel.Caption := Phases[I].Label_;
+
+    StatusLabels[I] := TNewStaticText.Create(ProgressPage);
+    StatusLabels[I].Parent := ProgressPage.Surface;
+    StatusLabels[I].Left := 230;
+    StatusLabels[I].Top := RowTop;
+    StatusLabels[I].Width := 200;
+    StatusLabels[I].Caption := 'Pending';
+  end;
+end;
 
 procedure InitializeWizard;
 begin
+  InitPhaseList;
+
   ProjectPathPage := CreateInputDirPage(wpWelcome,
     'Choose Install Folder', 'Where should the OwnTech project be set up?',
     'Setup will create the project folder and clone the OwnTech Core repository into it. ' +
@@ -66,6 +125,13 @@ begin
     False, '');
   ProjectPathPage.Add('');
   ProjectPathPage.Values[0] := 'C:\owntech';
+
+  CreateProgressPage;
+
+  // Files with Flags: dontcopy aren't auto-extracted to {tmp} -- without
+  // this call, {tmp}\install_owntech.ps1 doesn't exist yet when RunPhase
+  // first tries to use it.
+  ExtractTemporaryFile('install_owntech.ps1');
 end;
 
 // Extracts the "[FAILED] ..." / "How to fix: ..." lines Stop-Install already
