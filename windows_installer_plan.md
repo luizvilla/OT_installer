@@ -1141,18 +1141,95 @@ flowchart TD
     Done --> End(["Wizard closes"])
 ```
 
-Not yet implemented — this is a design document, produced before any wizard code exists. The script-side
-refactor for option (A) above and the retry-coverage gap on the four `winget` installs are both real
-prerequisites worth doing first, per this doc's established measure/harden-before-building pattern.
+Not yet implemented — this is a design document, produced before any wizard code exists. The retry-coverage
+gap on the four `winget` installs is now closed (see "winget retry-with-backoff closed the coverage gap"
+below); the script-side refactor for option (A) above is not — see the concrete step-by-step plan for it
+immediately below.
+
+#### Per-phase refactor implementation plan (2026-07-26, proposal)
+
+**Goal**: let a wizard (or anything else) invoke each installer step as a separate process call, checking
+its own exit code, to drive one progress bar/checklist row per step — this is what "option (A)" in the
+wizard design above actually requires, sized out as concrete, independently-committable steps rather than
+left as a detail to figure out later.
+
+**Core design problem**: splitting into separate process invocations means each one starts with a blank
+slate — none of `install_owntech.ps1`'s current in-memory state (`$resolvedProjectPath`, `$coreDir`,
+whether PlatformIO's core dir got redirected, the `$installed` hashtable used for the final summary)
+survives across a real process boundary the way it does within one continuous script run today. Proposed
+fix: a small state file, `<ProjectPath>\.owntech_install_state.json` (scoped to this specific install run,
+not machine-wide), holding `ProjectPath`, `CoreDir`, `PlatformIOCoreDirRedirected`, and `Installed`
+(component → bool). Each phase invocation reads it at start and writes it back at the end.
+
+**Phase names**, matching the wizard design's checklist plus preflight: `preflight`, `git`, `python`,
+`cmake`, `vscode`, `extensions`, `clone`, `bundle`, `bootstrap`, `build`, `summary`.
+
+**Backward-compatibility guarantee, load-bearing for every step below**: `install_owntech.ps1` invoked
+*without* `-RunPhase` keeps running the full sequence exactly as it does today. This is what lets every
+existing caller (`run_timed_install_test.ps1`, `test_hardening.ps1`, a user running the script directly)
+keep working unmodified throughout the refactor, and it's what makes each step below independently safe
+to commit and test in isolation — nothing about the per-phase path is load-bearing until a wizard actually
+starts using it.
+
+**Steps, each its own commit, each leaving the script in a working, independently-testable state:**
+
+1. **Add state persistence, wired into today's existing single-process flow — no behavior change.** New
+   `Get-InstallState`/`Save-InstallState` functions. Call `Save-InstallState` at the points where
+   `$resolvedProjectPath`, `$coreDir`, etc. are already first computed today, so the file accumulates the
+   same information the in-memory variables hold — but the script keeps using its in-memory variables
+   exactly as before; the file is a parallel, currently-unread side effect at this stage.
+   *Verification*: existing suite (`test_hardening.ps1`, a real `run_timed_install_test.ps1` cycle) should
+   behave identically, since nothing reads the new file yet.
+   *Commit*: "Add install-state persistence (JSON file), no behavior change."
+
+2. **Add `-RunPhase <name>` for isolated single-phase invocation.** When passed: read state from the file
+   (with a sensible first-run fallback for `preflight`, which has nothing to read yet), run only that
+   phase's logic, `Save-InstallState`, exit with that phase's own success/failure code — instead of
+   running the full Phase 0–6 sequence. When omitted: unchanged. This is the mechanical core of the whole
+   refactor. Worth folding in here too: a `-ListPhases` flag printing phase names in order, one per line —
+   small addition, and it means a wizard can discover phases at runtime instead of hardcoding names/order
+   separately from the script and risking drift.
+   *Verification*: manually invoke each `-RunPhase` value in sequence and confirm the end state matches a
+   normal full run's end state (same components installed, same final `D:\owntech`/core-dir layout) —
+   formalized properly in step 6.
+   *Commit*: "Add -RunPhase for isolated single-phase invocation, defaulting to full sequential run."
+
+3. **Split the combined `Phase 1` (Git+Python+CMake) into three separately-named phases** (`git`,
+   `python`, `cmake`). Needed because the wizard wants one checklist row per component, not one row
+   covering all three.
+   *Commit*: "Split prerequisites into separate git/python/cmake phases."
+
+4. **Split `Phase 5` (bundle-seed + bootstrap + build) into three separately-named phases** (`bundle`,
+   `bootstrap`, `build`) — the highest-value split of the two, since Phase 5 alone is 68% of total install
+   time (5m33s of 8m08s measured earlier). This is specifically what turns "one bar stalled 8+ minutes"
+   into three shorter, individually-completing bars.
+   *Commit*: "Split smoke-test build into separate bundle/bootstrap/build phases."
+
+5. **Re-run the full existing verification suite against the refactored script** — `test_hardening.ps1`
+   (all 7 cases) and one real `run_timed_install_test.ps1` cycle, both invoked exactly as before (no
+   `-RunPhase`), confirming the backward-compatibility guarantee actually held through steps 1–4 and
+   nothing regressed.
+   *Commit*: none expected; a fixup commit only if something did regress.
+
+6. **Add a test proving the `-RunPhase` sequence itself reproduces a full run's result** — the actual
+   proof the wizard's mechanism will work, before writing any Inno Setup code. A new test group invoking
+   each phase name in order as separate child-process calls (mirroring exactly how Inno Setup's `[Code]`
+   section would call them via `Exec`), checking each exit code, asserting the end state matches what a
+   normal single-process full run produces.
+   *Commit*: "Add test proving per-phase invocation matches a full run."
+
+**Not included in this plan**: the actual Inno Setup wizard code and the live multi-bar progress UI itself
+— this plan only covers making the underlying script callable in a way that UI can be built on top of.
 
 ## Open decisions
 
 - ~~Distribution: plain script vs. a signed `.exe` wrapper — defer until the script itself is proven
   reliable.~~ — the script is now well-evidenced as reliable (see the hardening and real-world-cycle work
-  above); a full wizard design proposal exists (see "GUI wizard design" above) but is not yet built. Two
-  concrete prerequisites identified there, worth doing first: a script-side refactor for per-phase
-  invocation (needed for the multi-bar progress UI), and extending retry-with-backoff to the four
-  `winget`-based installs (currently single-attempt, unlike the four network-download call sites).
+  above); a full wizard design proposal exists (see "GUI wizard design" above) but is not yet built. Of
+  the two prerequisites identified there: ~~extending retry-with-backoff to the four `winget`-based
+  installs~~ is done (see "winget retry-with-backoff closed the coverage gap"); the script-side per-phase
+  refactor needed for the multi-bar progress UI has a concrete step-by-step plan (see "Per-phase refactor
+  implementation plan") but isn't implemented yet.
 - ~~Whether Windows needs a USB driver for the SPIN board...~~ — answered, 2026-07-26: no. See "SPIN board
   USB/upload path verified on real hardware" near the end of this doc.
 - Whether the installer replaces Steps 1–6 in `environment_setup.md` outright, or the docs keep the
