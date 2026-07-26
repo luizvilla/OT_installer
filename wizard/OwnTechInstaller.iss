@@ -56,7 +56,18 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "..\install_owntech.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 
 [Run]
-; Nothing to run yet -- real phase execution gets wired in step 4.
+; Standard Inno Setup mechanism for "would you like to launch X now?" --
+; renders as a checked-by-default checkbox on the Finished page, matching
+; install_owntech.ps1's own [Y/n]-defaults-yes prompt for the same thing
+; (which never fires here since every -RunPhase call uses -NonInteractive).
+; skipifsilent: don't auto-launch during unattended/silent installs.
+; --disable-workspace-trust: skips VS Code's "do you trust this folder?"
+; prompt for THIS launch only (confirmed session-only, not a persistent or
+; global setting -- https://code.visualstudio.com/docs/editor/workspace-trust)
+; -- a reasonable trade-off for a folder this same script just freshly
+; cloned from the official repo, without weakening trust for anything
+; else the user opens later.
+Filename: "{cmd}"; Parameters: "/C code --disable-workspace-trust ""{code:GetActualRepoPath}"""; Description: "Open the OwnTech project in VS Code"; Flags: postinstall skipifsilent runasoriginaluser nowait
 
 [Code]
 const
@@ -186,6 +197,24 @@ begin
   // this call, {tmp}\install_owntech.ps1 doesn't exist yet when RunPhase
   // first tries to use it.
   ExtractTemporaryFile('install_owntech.ps1');
+end;
+
+// {code:GetActualRepoPath} in [Run]'s Parameters needs the *actual* clone
+// location, not necessarily ChosenProjectPath verbatim -- Get-RepoPath (in
+// install_owntech.ps1) nests into a Core subfolder instead of the chosen
+// folder itself when that folder was non-empty and had no existing .git
+// (the same case the overwrite-confirmation dialog already warns about).
+// Mirrors that same decision here rather than reading it back from the
+// state file, which would need replicating its MD5-based filename scheme
+// in Pascal for comparatively little benefit.
+function GetActualRepoPath(Param: String): String;
+begin
+  if DirExists(ChosenProjectPath + '\.git') then
+    Result := ChosenProjectPath
+  else if DirExists(ChosenProjectPath + '\Core\.git') then
+    Result := ChosenProjectPath + '\Core'
+  else
+    Result := ChosenProjectPath; // shouldn't normally happen if clone succeeded
 end;
 
 // Extracts the "[FAILED] ..." / "How to fix: ..." lines Stop-Install already
