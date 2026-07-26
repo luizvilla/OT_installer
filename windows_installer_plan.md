@@ -1352,12 +1352,71 @@ writing code so they're a deliberate choice, not a surprise found mid-implementa
 `build_platformio_bundle.ps1`, if that ends up being wanted) — worth doing once the wizard itself is
 proven, not before, matching this project's own established pattern of proving something manually first.
 
+### Wizard build results (2026-07-26) — all 6 steps implemented; one real bug found and fixed per step
+
+All 6 steps above are implemented in `wizard/OwnTechInstaller.iss` and pushed, each its own commit. Built
+with Inno Setup 6.7.3 (installed via `winget install JRSoftware.InnoSetup`, per-user, no admin needed —
+consistent with everything else this project has installed).
+
+**A real constraint stated up front, since it shaped how every step was verified**: there is no
+GUI-automation tool available in this environment, so the interactive wizard windows could never be
+clicked through directly. Verification instead relied on: (a) `ISCC.exe` compilation catching real syntax
+and type errors, (b) Inno Setup's `/VERYSILENT` mode, which turned out to actually drive `[Code]` page
+logic (`NextButtonClick`, `CurPageChanged`) with default/preset values rather than being a bare no-op
+install — genuinely useful for testing beyond what was initially expected — and (c) reading the resulting
+install-state file and Inno Setup's own detailed log after each run. This caught three real, concrete bugs:
+
+1. **`ExtractTemporaryFile` missing** (found testing step 3). `Flags: dontcopy` does not auto-extract a
+   file to `{tmp}` — it requires an explicit call. Without it, `{tmp}\install_owntech.ps1` didn't exist
+   when the path page's `-RunPhase preflight` call tried to use it, which would have broken step 2's path
+   validation the first time anyone actually ran the wizard. Fixed by calling `ExtractTemporaryFile` in
+   `InitializeWizard`.
+2. **A line starting with `[` gets misread as a section tag** (found compiling step 2) — a well-known Inno
+   Setup gotcha, hit by a `Format(...)` call's array-of-arguments literal landing at the start of a
+   continuation line. Fixed by keeping it on one line.
+3. **`WizardForm.Close` does not abort Setup** (found deliberately exercising the retry path in step 5) —
+   the single most important bug found, since it meant a user clicking Cancel after a failed, unretryable
+   phase would have seen Setup silently report success anyway. Fixed with `Abort`, Inno Setup's actual API
+   for this. See the step-5 commit for the full test that found it.
+
+**What was verified end to end, concretely**: a real `/VERYSILENT` run against the already-configured
+`D:\owntech` (idempotent skip paths throughout) completed with exit 0, and the resulting install-state
+file contained correct, complete data that could only have resulted from all 9 phases running as genuinely
+separate `Exec`-spawned processes, each correctly reading and writing shared state — the core mechanism
+this whole wizard depends on. Separately, deliberately forcing a real failure (temporarily renaming the
+real `git.exe`, combined with a fake `winget.cmd` shim that always fails) produced a log showing the
+retry dialog firing with the correct phase-specific message, "User chose Retry" twice, then re-invoking
+`-RunPhase git` each time — confirming the retry loop itself works as designed, before it surfaced bug 3
+above.
+
+**What was not, and could not be, cleanly verified**: the exact visual/interactive experience (does
+"Running..." reliably appear via `.Repaint` before each blocking `Exec` call; does the path/progress page
+layout look right; does the Retry/Cancel dialog read well) — none of this is checkable without a screen
+and a mouse. Also, re-verifying the `Abort` fix specifically via automated silent testing turned out to be
+unreliable in a way worth recording honestly rather than papering over: of three repeated attempts at the
+same forced-failure scenario, `/VERYSILENT` cleanly auto-answered a sequence of Retry/Retry/Cancel dialogs
+exactly once — the other two attempts hung indefinitely waiting for the same type of dialog and had to be
+killed via a safety timeout. `Abort` is Inno Setup's standard, documented API for this exact purpose and
+the change itself is small and low-risk, but this specific path genuinely needs a real interactive run to
+fully confirm.
+
+**Recommended next action, not yet done**: run `wizard\dist\OwnTechInstaller.exe` interactively, once,
+covering at minimum: the Welcome page, entering a bad path (confirm the error dialog reads correctly and
+blocks advancing), entering a good path, watching the progress checklist actually update through all 9
+rows, and reaching the Completion page. This is the one verification step in the whole build that
+genuinely requires a human at the keyboard.
+
 ## Open decisions
 
 - ~~Distribution: plain script vs. a signed `.exe` wrapper — defer until the script itself is proven
-  reliable.~~ — the script is now well-evidenced as reliable (see the hardening and real-world-cycle work
-  above); both prerequisites for the wizard are done (winget retry-with-backoff, the per-phase refactor),
-  and a concrete 6-step build plan exists (see "Wizard build plan" above). Not yet started.
+  reliable.~~ — done: `wizard/OwnTechInstaller.iss` implements all 6 planned steps, compiles, and passed
+  every automated check available without a GUI-automation tool (see "Wizard build results" above). **Not
+  yet manually verified interactively** — that's the one remaining step before treating this as real.
+- **Whether/where to host the compiled wizard `.exe`** — a new question now that it actually exists.
+  Likely a GitHub Release on `OT_installer`, mirroring the PlatformIO bundle's existing hosting, but
+  deliberately not done as part of this build: publishing a binary the user hasn't run themselves yet felt
+  like a different order of consequential action than the source commits leading up to it. Do the manual
+  interactive verification (see "Wizard build results" above) first.
 - Whether to code-sign the compiled wizard `.exe` — an unsigned installer triggers a Windows SmartScreen
   "unknown publisher" warning on first run, which cuts against the whole point of a wizard being the more
   approachable, official-feeling option. Requires a code-signing certificate (a real cost/process, not
