@@ -1475,6 +1475,27 @@ account — a known, harmless, already-documented pattern, not a bug) and delete
 PlatformIO core dir, and related config. One thing worth knowing before running it yourself: it also
 deletes `.gitconfig`, which will require re-running `git config --global user.name/user.email` afterward if
 you do any git work on this machine post-reset (a gotcha this project's own sessions have hit repeatedly).
+It also requires a PowerShell execution-policy bypass to run at all (`Set-ExecutionPolicy -Scope Process
+-ExecutionPolicy Bypass` first, or `powershell -ExecutionPolicy Bypass -File ...`) — already documented in
+`install_owntech.ps1`'s own usage comment, but easy to miss when just told to run `reset_environment.ps1`
+directly, as happened here.
+
+#### Two more real dry-run findings (2026-07-27)
+
+- **"Stuck" on Build firmware — not actually stuck.** Investigated directly on the same machine: active,
+  growing CPU usage and `.pyc` files being written seconds earlier confirmed the build was genuinely
+  progressing, not hung. The real problem is the already-documented UX gap made concrete: this step's
+  blocking `Exec` call means the progress row shows "Running..." with no visible change for the step's
+  entire duration (10+ minutes on a fresh, bundle-less install), which reasonably reads as frozen even
+  though it isn't. Not yet fixed — worth a follow-up (e.g. explanatory text specific to this step, set
+  before it starts, along the lines of "this can take 10+ minutes with no visible progress").
+- **A confusing final "where should the installer be installed" prompt** — Inno Setup's own standard
+  "Select Destination Location" page, never disabled, asking about the wizard's own (empty, uninstaller-
+  only) install location, unrelated to and easily confused with the OwnTech project path already chosen
+  earlier. Made worse by appearing *after* all 9 real phases finish, since they run via custom pages
+  inserted early in the flow, while this standard page keeps its normal late position. Fixed with
+  `DisableDirPage=yes`; also proactively skipped the same-category "Ready to Install" confirmation
+  (`ShouldSkipPage(wpReady)`) for the same reason, before it was reported as a separate complaint.
 
 ## Open decisions
 
