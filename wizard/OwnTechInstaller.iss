@@ -72,6 +72,7 @@ var
   ProgressPage: TWizardPage;
   Phases: array[0..PhaseCount - 1] of TPhaseInfo;
   StatusLabels: array[0..PhaseCount - 1] of TNewStaticText;
+  PhasesStarted: Boolean;
 
 procedure InitPhaseList;
 begin
@@ -206,5 +207,77 @@ begin
       MsgBox('This folder can''t be used:' + #13#10#13#10 + FailureMsg, mbError, MB_OK);
       Result := False;
     end;
+  end;
+end;
+
+// Runs one phase, retrying on failure until the user either succeeds or
+// cancels. The dialog logic is deliberately uniform across all 9 phases --
+// no per-phase fatal-vs-recoverable special-casing here, because the script
+// already encodes that distinction via its own exit code: a gracefully
+// degraded step (e.g. the optional VS Code extensions, or the bundle
+// falling back to a live download) exits 0 just like full success, and only
+// a genuinely fatal Stop-Install produces a non-zero exit. Reacting to exit
+// code alone is sufficient and avoids duplicating the fatal/recoverable map
+// from "GUI wizard design" a second time in Pascal.
+function RunPhaseWithRetry(const PhaseIndex: Integer): Boolean;
+var
+  LogFile: String;
+  LogTextRaw: AnsiString;
+  FailureMsg: String;
+  ExitCode, Choice: Integer;
+  Retrying: Boolean;
+begin
+  Retrying := True;
+  Result := False;
+  while Retrying do
+  begin
+    StatusLabels[PhaseIndex].Caption := 'Running...';
+    StatusLabels[PhaseIndex].Repaint;
+    LogFile := ExpandConstant('{tmp}\phase_' + Phases[PhaseIndex].Key + '_log.txt');
+    ExitCode := RunPhase(Phases[PhaseIndex].Key, ChosenProjectPath, LogFile);
+    if ExitCode = 0 then
+    begin
+      StatusLabels[PhaseIndex].Caption := 'Done';
+      StatusLabels[PhaseIndex].Repaint;
+      Result := True;
+      Retrying := False;
+    end
+    else
+    begin
+      StatusLabels[PhaseIndex].Caption := 'Failed';
+      StatusLabels[PhaseIndex].Repaint;
+      LogTextRaw := '';
+      if FileExists(LogFile) then
+        LoadStringFromFile(LogFile, LogTextRaw);
+      FailureMsg := ExtractFailureMessage(String(LogTextRaw));
+      Choice := MsgBox(Phases[PhaseIndex].Label_ + ' failed:' + #13#10#13#10 + FailureMsg,
+        mbError, MB_RETRYCANCEL);
+      if Choice = IDCANCEL then
+        Retrying := False; // Result stays False
+    end;
+  end;
+end;
+
+procedure RunAllPhases;
+var
+  I: Integer;
+begin
+  for I := 0 to PhaseCount - 1 do
+  begin
+    if not RunPhaseWithRetry(I) then
+    begin
+      MsgBox('Setup cannot continue without completing this step.', mbError, MB_OK);
+      WizardForm.Close;
+      Exit;
+    end;
+  end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = ProgressPage.ID) and (not PhasesStarted) then
+  begin
+    PhasesStarted := True;
+    RunAllPhases;
   end;
 end;
