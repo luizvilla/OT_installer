@@ -25,11 +25,17 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 ; Not a persistent application -- this wizard's own footprint is minimal, it
 ; exists to drive install_owntech.ps1 against a project folder the user
-; chooses on a later page (added in step 2), not to "install itself"
-; anywhere meaningful. DefaultDirName is still required by Inno Setup even
-; so; kept in a low-privilege location consistent with PrivilegesRequired
-; below.
+; chooses on a later page (the custom ProjectPathPage below), not to
+; "install itself" anywhere meaningful. DefaultDirName is still required by
+; Inno Setup even so; kept in a low-privilege location consistent with
+; PrivilegesRequired below. DisableDirPage skips Inno Setup's own standard
+; "Select Destination Location" page for it -- without this, it still shows
+; up (confusingly, after the real work is already done, since that's where
+; Inno Setup's normal flow places it) asking the user where to install the
+; wizard itself, unrelated to and easily confused with the actual OwnTech
+; project folder already chosen on the custom page earlier.
 DefaultDirName={localappdata}\OwnTechInstallerWizard
+DisableDirPage=yes
 DisableProgramGroupPage=yes
 ; Preserves the constraint the whole underlying project has been built
 ; around: install_owntech.ps1 itself must work fully unelevated, and this
@@ -249,6 +255,15 @@ begin
 end;
 
 function RunAllPhases: Boolean; forward;
+
+// Skips Inno Setup's standard "Ready to Install" confirmation -- same
+// reasoning as DisableDirPage in [Setup]: all the real work already
+// happened on the custom progress page, so a "click Install to begin"
+// prompt at this point would be confusing (there's nothing left to start).
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = wpReady);
+end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
