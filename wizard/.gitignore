@@ -1,0 +1,3 @@
+# Build output -- rebuild with ISCC.exe OwnTechInstaller.iss
+dist/
+*.log
