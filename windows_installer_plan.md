@@ -761,6 +761,38 @@ consistent with the localhost figure. Not yet done: re-running the full `run_tim
 against this real public URL instead of localhost, for a fully real-world (not localhost-download) end to
 end number to sit alongside the 452s one above.
 
+#### Full timed cycle against the real public URL (2026-07-26) — 8m08s, closing the loop
+
+Ran the same `run_timed_install_test.ps1` cycle as before, but with `-BundleUrl` pointed at the real
+`luizvilla/OT_installer` release asset instead of `localhost`. Reset: 2m35s (same CMake-1603 pattern as
+every prior run). Install: **succeeded, 8m08s**. Phase breakdown:
+
+| Phase | Time |
+|---|---|
+| 0–1: Preflight + Git install | 57s |
+| 2: VS Code install | 71s |
+| 3: PlatformIO extension | 21s |
+| 4: Clone Core | 5s |
+| 5: Bundle-seed (real download+verify+7za-extract) + bootstrap + build | **333s (5m33s)** |
+| **Total** | **488s (8m08s)** |
+
+Complete comparison across every full-cycle measurement in this doc:
+
+| Run | Phase 5 | Total | vs. original baseline |
+|---|---|---|---|
+| Original baseline (no bundle) | 629s (10m29s) | 789s (13m09s) | — |
+| + Defender exclusion (manual, elevated) | 460s (7m40s) | 609s (10m09s) | −23% |
+| + bundle/7za/progress-fix/space-fix (localhost bundle) | 293s (4m53s) | 452s (7m32s) | −43% |
+| **+ same, real public GitHub release URL** | **333s (5m33s)** | **488s (8m08s)** | **−38%** |
+
+The real-URL run is 40s slower on Phase 5 than the localhost run — consistent with the ~18.5s real
+download plus normal run-to-run variance in the live `pip`/PlatformIO dependency downloads and winget
+installs, which hit the real internet in *every* row of this table, not just this one. This is the first
+fully real-world number in the whole investigation: no localhost shortcuts anywhere in the chain (bundle
+download, `pip`/PlatformIO installs, winget installs all hit real servers), and it still lands at a 38%
+total reduction from the original baseline with zero manual or elevated steps required. This closes out
+the "not yet done" item directly above.
+
 ## Open decisions
 
 - Distribution: plain script users download and run, vs. a signed `.exe` wrapper — defer until the
@@ -783,8 +815,12 @@ end number to sit alongside the 452s one above.
   609s-with-manual-Defender-exclusion / 789s-original-baseline prior bests — see "Full timed
   reset+reinstall cycle" above). ~~Still open: publishing an actual bundle release...~~ — done: published
   to `luizvilla/OT_installer`'s `pio-bundle-20260726` release, real unauthenticated download verified
-  (18.5s/0.36GB, correct hash) — see "Project moved to its own repo..." above. Still open: a full
-  `run_timed_install_test.ps1` cycle against the real public URL instead of localhost.
+  (18.5s/0.36GB, correct hash) — see "Project moved to its own repo..." above. ~~Still open: a full
+  `run_timed_install_test.ps1` cycle against the real public URL...~~ — done: 488s total (5m33s Phase 5),
+  a −38% reduction from the original baseline with zero manual/elevated steps and no localhost shortcuts
+  anywhere in the chain — see "Full timed cycle against the real public URL" above. This whole investigation
+  thread (uncompressed-payload question → 7za/progress/space fixes → real publish+verify) is now closed
+  out end to end.
 - Whether the "full downloadable local installer" (Inno Setup/NSIS/signed `.exe`, or a mountable
   VHD/VHDX) is still worth pursuing now that it's no longer needed to fix Phase 5 specifically — it may
   still be worth it purely for distribution/offline UX, but that's now a separate question from extraction
