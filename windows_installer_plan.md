@@ -1532,12 +1532,242 @@ only the *mechanism* explaining the inconsistent timing was wrong. In effect, ev
 this whole file — including the retry-path mechanism and the `Abort`/`NextButtonClick` fix — was already a
 real interactive confirmation, not merely an automated one as characterized at the time.
 
+#### Wired `-BundleUrl`/`-BundleSha256` into the wizard (2026-07-27)
+
+The wizard's own final verification run took ~11 minutes because its `RunPhase` calls omitted
+`-BundleUrl`/`-BundleSha256`, falling back to the no-bundle baseline instead of the 8m08s bundle-backed one
+measured earlier in this doc — user asked directly why the run was slow (guessing VS Code downloads; it
+wasn't — VS Code only launches after all 9 phases finish) and then asked to wire the bundle in.
+
+Hardcoded the already-published, already-verified release asset
+(`luizvilla/OT_installer`'s `pio-bundle-20260726/pio_bundle_v2.zip`, same URL/SHA256 as the 8m08s real-URL
+timed cycle above) as Pascal `const`s in `OwnTechInstaller.iss`, and had `RunPhase` append
+`-BundleUrl "..." -BundleSha256 "..."` only to the `'bundle'` phase's command line (every other phase's
+command line is unchanged). Safe to hardcode: `Invoke-BundleSeed` already treats any failure here
+(unreachable URL, checksum mismatch, extraction failure) as non-fatal and silently falls back to a full
+download, so a future stale/deleted release asset degrades to today's no-bundle behavior, not a break — no
+new failure mode introduced.
+
+Verified: wizard compiles clean. Also ran `-RunPhase preflight`/`clone`/`bundle` directly against a fresh
+scratch project path with the exact `-BundleUrl`/`-BundleSha256` values `RunPhase` now passes, confirming
+the args reach the script correctly — it reported packages already present in the shared
+`C:\.platformio_core` (left over from this machine's own prior test cycles) and skipped the download, which
+is the idempotency check working as designed, not a wiring failure. The download+extract path itself was
+already proven end to end by the real-URL timed cycle earlier in this doc against this identical URL. Not
+yet re-verified as a full wizard GUI run on a genuinely fresh machine with an empty core dir — worth doing
+before calling the ~8 min figure confirmed *through the wizard* specifically rather than just through the
+underlying script.
+
+#### Static per-phase time estimates, no live counter (2026-07-27/28)
+
+Follow-up to the timer-based-progress-bar discussion above: user asked whether a live "MM:SS / typical"
+counter could run alongside the existing marquee bar. Investigated and explained why it can't without a
+much bigger change first — `Exec(..., ewWaitUntilTerminated, ...)` doesn't return control to script until
+the child process exits, so *no* UI element (bar position or a text counter) can update mid-phase without
+replacing it with a raw Win32 `CreateProcess`/`WaitForSingleObject`-polling loop, a real rewrite of the same
+mechanism that determines install success/failure. Given that risk for a cosmetic win, user asked instead
+for a static "typical time" message near each bar — no counter, no polling, no execution-model change.
+
+Added a `TimeEstimate` field to `TPhaseInfo`, rendered as a small `clGrayText` line under each phase name
+(`TimeLabels[I]`, set once in `InitPhaseList`, never touched by `SetPhaseVisualState` or anything else after
+that). Row height grew from 26px to 32px to fit the second line; bar/status column positions (`Left`
+values) are unchanged. Values are real numbers, not guesses — pulled directly from
+`install_timing_20260726_095037.log` (the `post-refactor-verification` row in
+`install_timing_history.csv`, bundle-backed, 8m13s total), which has a per-phase timestamp for this exact
+9-phase split:
+
+| Phase | Measured | Caption used |
+|---|---|---|
+| Git | 59s (fresh winget install) | "usually <1 min" |
+| Python | ~0s (already present on that machine) | "usually <1 min" (Git's number used as the fresh-install proxy, since Python/CMake weren't actually exercised fresh in this log) |
+| CMake | ~0s (already present) | "usually <1 min" |
+| VS Code | 76s | "typically ~1-2 min" |
+| Extensions | 30s | "typically ~30 sec" |
+| Clone | 3s | "typically ~5 sec" |
+| Bundle | 104s | "typically ~1-2 min" |
+| Bootstrap | 37s | "typically ~1 min" |
+| Build | 183s | "typically ~3 min, longer on a fresh machine" (the one row given an explicit caveat, since this is the step that prompted the original "looks stuck" report — a first-ever build without a working bundle can take 10+ minutes, not ~3) |
+
+Also added one sentence to the progress page's own description ("Times shown are typical for a similar
+machine, not a live measurement of this run.") rather than repeating that caveat on every row.
+
+Verified: compiles clean. **Not yet visually confirmed** — row spacing, `clGrayText` legibility in both
+light/dark Windows themes, and whether 9 rows at the new 32px height still fit the page without scrolling
+are all things I can't check without a GUI, consistent with every other visual claim in this file. Worth a
+look on the next real dry run.
+
+#### "New Project" mode (2026-07-28)
+
+User raised a real gap: non-git-literate users of this installer will eventually want a **second,
+independent** OwnTech project once their environment is already set up, and today's only options are
+re-running the whole wizard with a manually-typed raw path, or copy-pasting the existing project folder by
+hand (drags along a stale `.pio` build cache, re-triggers VS Code's workspace-trust prompt). Discussed
+options (plain copy-paste vs. a "name your project" mode vs. a full standalone "OwnCode" project-manager
+tool) and recommended the middle one — the installer's phases are already idempotent and re-runnable per
+`-ProjectPath`, so this is mostly a page-flow/UX change, not a new deliverable.
+
+**Model landed on**: one fixed workspace folder per machine (default `C:\owntech`), created once, that
+every project — including the first — lives under as a named subfolder (`C:\owntech\<ProjectName>`), never
+directly in the workspace root itself. This makes the first project uniform with every later one (no
+special-casing), but is a deliberate, visible default change from before (a first-time user used to land
+directly at `C:\owntech`; now the first project lands at `C:\owntech\<name>`).
+
+**How the wizard "remembers" the workspace across separate runs** (a fresh process each time, with no memory
+of anything): a small marker file at `%LOCALAPPDATA%\OwnTechInstaller\workspace_root.txt`, written once
+after a successful first-run preflight, read back at the start of every later run. No mode-choice radio
+button was added — the file's mere presence *is* the "have I done this before" signal, so asking the user to
+also declare it would be asking something the software already knows. Deliberately a plain text file (not a
+registry entry), consistent with this wizard's low-footprint philosophy (`PrivilegesRequired=lowest`, no
+persistent install) — the documented escape hatch if someone wants a different workspace later is simply
+deleting that file.
+
+New page flow: **Welcome → [Workspace Folder, only if `workspace_root.txt` doesn't exist yet] → Project Name
+→ Progress → Finished** (was: Welcome → Choose Install Folder → Progress → Finished). Implementation notes:
+- `TInputDirWizardPage.Add()` (used once already, for the workspace folder's own field) turned out to only
+  ever add another Browse-button/folder-picker row, not a generic text field — confirmed against the Inno
+  Setup docs before use, following this project's established habit of checking uncertain APIs rather than
+  guessing. So "where" (`FolderPage`) and "what to call it" (`NamePage`) are two separate page types
+  (`TInputDirWizardPage` / `TInputQueryWizardPage`), not one page with two fields as first sketched.
+  `ShouldSkipPage` (already existed, for `wpReady`) got a second condition —
+  `(PageID = FolderPage.ID) and WorkspaceKnown` — to skip the folder page on every run after the first.
+- A real validation gap was found and closed: `Test-ProjectPath` (`install_owntech.ps1`) checks
+  spaces/length/OneDrive on the *composed* path, but never checks filesystem-illegal characters or reserved
+  Windows device names (`CON`, `PRN`, `COM1`-`9`, etc.) on the name in isolation — those would otherwise only
+  surface as a vague "Could not create project folder" from `Invoke-PhasePreflight`'s own `New-Item` call,
+  after a full process round trip. Added `ValidateProjectName` in Pascal to reject those specifically,
+  client-side, before ever calling `-RunPhase preflight` — leaving the composed-path checks
+  (spaces/length/OneDrive) to the existing backend call unchanged, no duplication.
+- `RunAllPhases`/the 9-phase progress page are completely unchanged — every project, first or fifth, still
+  runs all 9 phases against its own `-ProjectPath`. Deliberately did **not** add logic to skip
+  git/python/cmake/vscode/extensions for a "returning" project: those phases already self-verify
+  ("already installed, skipping") in a few seconds regardless of what the wizard believes about the
+  machine's history, so trusting the workspace-known flag as an install-skip signal would add real branching
+  complexity for negligible time savings — and it means picking "New Project" on a machine where, say, VS
+  Code got uninstalled since the first run is handled correctly for free.
+- `install_owntech.ps1` needed **zero changes** — every phase already worked against any arbitrary new
+  `-ProjectPath` unmodified; this was purely a wizard-layer change.
+
+**Verified** (compile + direct `-RunPhase` calls, this project's established no-GUI-automation method):
+compiles clean. `-RunPhase preflight -ProjectPath C:\owntech_newproject_test\ProjectA` succeeds normally,
+correctly creating the nested folder even though the parent didn't exist yet (`New-Item -Force` handles
+this). `-RunPhase preflight -ProjectPath "C:\owntech_newproject_test\My Project"` still correctly fails with
+the existing "contains spaces" message — confirms the Pascal-side character/reserved-name check and the
+backend's space/length/OneDrive check stay cleanly divided with no gap between them. Cloned two independent
+projects (`ProjectA`, `ProjectB`) under the same scratch workspace root and confirmed both have their own
+independent `.git` — no cross-contamination. Scratch folder removed afterward.
+
+**Not yet verified** (needs a real interactive run, consistent with every other visual/dialog claim in this
+file): whether `ShouldSkipPage` actually skips the Folder page on a genuine second launch once
+`workspace_root.txt` exists; the illegal-character `MsgBox` actually appearing and reading well; the
+dynamically-set `NamePage.Description` context text actually rendering; and the marker-file
+read/write round trip through the compiled wizard specifically (rather than just the underlying
+`LoadStringFromFile`/`SaveStringToFile` pattern, which mirrors an already-proven-working pattern elsewhere in
+this same file).
+
+#### Real dry-run feedback on "New Project" mode (2026-07-28)
+
+First interactive run of the "New Project" changes surfaced four real issues — confirming several of the
+"not yet verified" risks flagged above were genuine, not just theoretical:
+
+- **Duplicate text on the Name page.** `NamePage.Description` was being set dynamically in `CurPageChanged`
+  to a string that *also* repeated the same "this becomes a new subfolder..." sentence already given
+  statically as the page's `ASubCaption` at creation time -- so it rendered twice. Fixed by keeping that
+  explanation only in the static `SubCaption`; the dynamic `Description` now only says where the project
+  lands ("New projects are created under X.").
+- **Crowded, overlapping Progress page.** Two separate problems, not one: (1) the phase name column was only
+  150px wide, and "Bootstrap PlatformIO Core" (the longest label) overflowed straight into the progress bar
+  next to it; (2) the name label and the static time caption under it (added in the earlier "static time
+  estimates" work) sat close enough vertically to visibly collide. Fixed by widening the name column to
+  190px (shifting the bar/status columns right by the same amount, so total row width is unchanged) and
+  giving the time caption a smaller font (7pt) with a bit more vertical clearance, plus a taller row (34px).
+  This is exactly the risk that section's own verification notes called out as untested ("row spacing...
+  whether 9 rows still fit... all things I can't check without a GUI") -- now it has real feedback instead of
+  a guess.
+- **Irrelevant description text on the Progress page.** The explanatory paragraph above the checklist
+  ("Each step below runs on its own...") was reported as just clutter on an already-busy page. Removed --
+  `CreateCustomPage(NamePage.ID, 'Installing OwnTech', '')`, empty description.
+- **Back buttons don't work, remove them.** Rather than debug why (this wizard's pages all have real,
+  one-directional side effects on Next -- preflight runs, confirmation dialogs, the workspace marker gets
+  written -- that were never designed to be undone by stepping backward), took the user's own suggested fix:
+  `WizardForm.BackButton.Visible := False` in both `InitializeWizard` (covers the very first Welcome page
+  display) and at the top of `CurPageChanged` (reasserted on every subsequent page change, since Inno
+  recalculates button visibility itself on each page and a one-time call wouldn't stick).
+
+Verified: compiles clean. The layout fix specifically still isn't re-confirmed visually (no screen access) --
+worth another look on the next real run to see whether 190px is actually enough margin and whether the Back
+button is genuinely gone everywhere, not just on the pages it was tested on.
+
+#### The layout fix above didn't actually work -- real root cause found (2026-07-28)
+
+A follow-up screenshot showed the fix above hadn't fixed anything: the phase name (e.g. "Git") and the time
+caption directly under it (e.g. "usually <1 min") were still visibly touching. Looking at the previous
+edit's actual numbers explains why: `NameLabel.Top` had been moved from `RowTop + 2` to `RowTop`, and
+`TimeLabels[I].Top` from `RowTop + 17` to `RowTop + 15` -- both shifted up by exactly the same 2px, so the
+*gap* between them never changed at all. The fix addressed the wrong thing.
+
+Root cause: `TNewStaticText` defaults to `AutoSize = True`, which silently resizes a control to fit its own
+Caption and ignores whatever `Width`/`Height` was assigned to it. This also retroactively explains the
+*original* horizontal bug ("Bootstrap PlatformIO Core" overflowing into the bar) -- the widened-name-column
+fix that seemed to work in the prior screenshot most likely worked by coincidence (the bar was moved far
+enough right to tolerate that string's real auto-computed width), not because the assigned `Width := 190`
+was actually in effect.
+
+Real fix: `AutoSize := False` on every label in this page (`NameLabel`, `TimeLabels[I]`, `StatusLabels[I]`),
+set *before* `Width`/`Height`/`Caption` so nothing recalculates them afterward. `RowHeight` raised to 40 with
+real, deliberate vertical spacing (name at `RowTop`, time caption at `RowTop + 18`, both with explicit fixed
+heights) instead of shifted-together guesses. Verified: compiles clean. **Still not re-confirmed visually**
+-- this is the second attempt at this specific bug, so genuinely worth a careful look (not just a glance) on
+the next real run before assuming it's actually fixed this time.
+
+#### Third round: descenders clipped, one caption truncated (2026-07-28)
+
+The `AutoSize := False` fix above genuinely fixed the name/time overlap (confirmed in the next screenshot --
+visible gap between e.g. "Git" and "usually <1 min", no touching). But it traded one bug for two new,
+smaller ones, both direct consequences of the same change: turning off auto-sizing means a label's Height is
+now taken literally, and the values chosen (16px name, 14px time) turned out a bit too short for a full line
+including descenders -- letters like g/p/y were visibly clipped at the bottom of their box. Separately, and
+for the same underlying reason (no more auto-sizing to bail it out), the Build firmware row's time caption
+("typically ~3 min, longer on a fresh machine", the longest of the nine) got clipped horizontally at its
+fixed 190px width, rendering as "...longer on a fresh n".
+
+Fixed by (1) growing the label heights with real margin -- name 16→20px, time/status 14/16→16/20px, row
+height 40→44px -- rather than the bare minimum that had just barely fit the cap-height alone, and (2)
+shortening the one caption that didn't fit rather than widening the column further for a single outlier:
+`'typically ~3 min, longer on a fresh machine'` → `'typically 3-10 min'`, matching the length and format of
+every other row's caption instead of being a full sentence. Verified: compiles clean.
+
+#### Renamed to OwnWizard (2026-07-28)
+
+Confirmed the layout fixes above look right on a real run. User then pointed out the tool's own name no
+longer fits: with "New Project" mode, this is meant to be run repeatedly on the same machine (once for
+environment setup, then again per project), not a one-shot "installer." Renamed throughout:
+`wizard/OwnTechInstaller.iss` → `wizard/OwnWizard.iss` (via `git mv`, preserving history), `MyAppName`
+`"OwnTech Environment Installer"` → `"OwnWizard"`, `OutputBaseFilename`/`DefaultDirName` updated to match --
+the compiled output is now `wizard/dist/OwnWizard.exe`. `AppId` (the GUID Windows uses internally to track
+the "application") was deliberately left unchanged -- it's not user-visible and there's no reason to churn
+it.
+
+**Deliberately left alone**: the shared `%LOCALAPPDATA%\OwnTechInstaller\` state directory (both
+`install_state_<hash>.json`, written by `install_owntech.ps1` itself via `Get-StateFilePath`, and this
+wizard's own `workspace_root.txt`). This is a backend/script convention independent of the wizard's own
+branding -- `install_owntech.ps1` can be (and has been, throughout this whole project's testing) run
+directly without the wizard at all, so renaming that directory would mean also changing the underlying
+script, which wasn't asked for and isn't really about "the wizard's name" in the first place.
+
+Verified: compiles clean, produces `OwnWizard.exe`. Removed the stale `OwnTechInstaller.exe` left in
+`wizard/dist/` from before the rename.
+
 ## Open decisions
 
 - ~~Distribution: plain script vs. a signed `.exe` wrapper — defer until the script itself is proven
-  reliable.~~ — done: `wizard/OwnTechInstaller.iss` implements all 6 planned steps, compiles, and passed
-  every automated check available without a GUI-automation tool (see "Wizard build results" above). **Not
-  yet manually verified interactively** — that's the one remaining step before treating this as real.
+  reliable.~~ — done: `wizard/OwnWizard.iss` (renamed 2026-07-28) implements every planned step, compiles,
+  and has now been through several rounds of *real* interactive dry runs (not just automated checks) —
+  overwrite confirmation, the crowded-progress-page bugs, the Back-button removal, and the rename were all
+  found/confirmed this way, with `%LOCALAPPDATA%\OwnTechInstaller\workspace_root.txt` on the dev machine
+  confirming a first-ever "New Project" run genuinely completed and persisted correctly. **Not yet
+  confirmed**: a *second* launch actually skipping the Workspace Folder page (the marker file existing now
+  makes this directly testable), and the illegal-project-name rejection dialog, which no dry run has
+  triggered yet.
 - **Whether/where to host the compiled wizard `.exe`** — a new question now that it actually exists.
   Likely a GitHub Release on `OT_installer`, mirroring the PlatformIO bundle's existing hosting, but
   deliberately not done as part of this build: publishing a binary the user hasn't run themselves yet felt
