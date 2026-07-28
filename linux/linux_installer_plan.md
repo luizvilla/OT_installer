@@ -573,6 +573,19 @@ under a given name shows the tailored reuse confirmation with the correctly comp
 proceeds straight through with no confirmation dialog. Also directly verified the `/`, `.`, `..`, and
 whitespace-only rejection branches.
 
+**Real packaging gotcha found from the user's own rebuild**: shipped this change without bumping the
+package version (stayed at `0.1.0` from the rename), and the user's `sudo apt install
+./ownwizard_0.1.0_all.deb` over their already-installed `0.1.0` silently no-op'd — apt/dpkg does not
+reinstall or overwrite files when the exact same version is already installed, so they kept running the
+old folder-picker script despite rebuilding. Reproduced exactly in a container (installed the old build,
+then reinstalled the new same-version build over it: `apt-get install` printed nothing and
+`/opt/ownwizard/ownwizard.sh` was confirmed still the old file), then confirmed a version bump to
+`0.2.0` fixes it (`apt` printed "Unpacking ownwizard (0.2.0) over (0.1.0)", new file confirmed present
+afterward). Fixed the immediate case by bumping to `0.2.0`, and added a comment directly above
+`build_deb.sh`'s `VERSION` default warning that it must be bumped whenever a packaged script actually
+changes -- note `build_deb.sh`'s own default silently overrides whatever version is checked into
+`linux/debian/DEBIAN/control`, so both need bumping together (or just pass `--version` explicitly).
+
 ### Outstanding
 
 - Publishing the `.deb` anywhere (a GitHub Release, a PPA, etc.) was explicitly out of scope for this

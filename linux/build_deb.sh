@@ -15,11 +15,17 @@
 #
 # Usage:
 #   ./build_deb.sh
-#   ./build_deb.sh --version 0.2.0 --out-file ownwizard_0.2.0_all.deb
+#   ./build_deb.sh --version 0.3.0 --out-file ownwizard_0.3.0_all.deb
+#
+# IMPORTANT: bump VERSION (below) whenever a packaged script actually
+# changes. 'apt install ./same-version.deb' silently no-ops if that exact
+# version is already installed -- it does NOT reinstall/overwrite files --
+# confirmed by reproducing exactly that in a container after a real script
+# change shipped without a version bump.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="0.1.0"
+VERSION="0.2.0"
 OUT_FILE=""
 
 while [ $# -gt 0 ]; do
