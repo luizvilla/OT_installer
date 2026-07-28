@@ -138,6 +138,27 @@ apt_install_verify() {
     write_ok "$display_name installed."
 }
 
+# 'python3 -m venv --help' is NOT a valid test of whether venv actually
+# works -- confirmed via a real container test, it exits 0 unconditionally
+# because the --help text ships as part of core python3 regardless of
+# whether the real implementation package (e.g. python3.12-venv) is
+# installed. The actual Debian/Ubuntu gotcha ("ensurepip is not available")
+# only surfaces when a real venv is created, so that's what has to be
+# tested -- an early, wrong version of this check would have silently
+# passed on a machine with the exact broken state this phase exists to
+# catch.
+python3_venv_functional() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    local test_dir
+    test_dir="$(mktemp -d)"
+    local ok=0
+    if python3 -m venv "$test_dir/venv" >/dev/null 2>&1 && [ -x "$test_dir/venv/bin/pip" ]; then
+        ok=1
+    fi
+    rm -rf "$test_dir"
+    [ "$ok" -eq 1 ]
+}
+
 install_vscode_extension() {
     local ext_id="$1" display_name="$2" required="${3:-}"
 
@@ -382,7 +403,7 @@ phase_preflight() {
 
     INSTALLED_GIT=0; INSTALLED_PYTHON=0; INSTALLED_CMAKE=0; INSTALLED_CODE=0
     if command -v git >/dev/null 2>&1; then INSTALLED_GIT=1; write_ok "git already detected on PATH."; fi
-    if command -v python3 >/dev/null 2>&1 && python3 -m venv --help >/dev/null 2>&1; then
+    if python3_venv_functional; then
         INSTALLED_PYTHON=1; write_ok "python3 (with venv support) already detected on PATH."
     fi
     if command -v cmake >/dev/null 2>&1; then INSTALLED_CMAKE=1; write_ok "cmake already detected on PATH."; fi
@@ -403,7 +424,7 @@ phase_git() {
 phase_python() {
     write_phase "Phase 1b: Install Python"
 
-    if command -v python3 >/dev/null 2>&1 && python3 -m venv --help >/dev/null 2>&1; then
+    if python3_venv_functional; then
         write_ok "Python 3 (with venv support) already installed, skipping."
         return 0
     fi
@@ -429,8 +450,8 @@ phase_python() {
     # loudly -- it silently produces a broken venv missing ensurepip, and the
     # failure only surfaces later, confusingly, inside that phase instead of
     # here where the actual cause is.
-    if ! python3 -m venv --help >/dev/null 2>&1; then
-        stop_install "'python3-venv' did not install correctly -- 'python3 -m venv' is not functional." \
+    if ! python3_venv_functional; then
+        stop_install "'python3-venv' did not install correctly -- creating a real venv fails (ensurepip unavailable)." \
             "Run 'sudo apt-get install --reinstall python3-venv' and re-run this script."
     fi
 
