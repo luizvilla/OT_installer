@@ -541,11 +541,37 @@ After the above was built and verified, the wizard was renamed to match Windows'
 identifiers unchanged (state dir `~/.local/state/owntech-installer/`, the `~/.profile` marker text) —
 same scoping as Windows, which didn't rename `install_owntech.ps1` either; only the GUI wizard's own
 name changed, not the backend script it wraps. Unlike the Windows rename, this pass didn't bring over
-that commit's other changes (New Project mode, hardcoded PlatformIO bundle URL, etc.) — naming only.
-Re-verified in a fresh container after the rename: install lands all three scripts at
+that commit's other changes (hardcoded PlatformIO bundle URL, etc.) — naming only; a simplified take on
+"New Project" mode itself followed in the next pass (see below). Re-verified in a fresh container after
+the rename: install lands all three scripts at
 `/opt/ownwizard/{install_owntech.sh,reset_environment.sh,ownwizard.sh}` plus
 `/usr/share/applications/ownwizard.desktop` (valid per `desktop-file-validate`), `apt remove ownwizard`
 cleans up fully.
+
+### Project-name mode (fixed workspace root, not a folder picker)
+
+Replaced the `zenity --file-selection --directory` folder picker with a `zenity --entry` project-*name*
+prompt — every project is now created as a named subfolder of a fixed workspace root (`$HOME/owntech`,
+overridable via `$WORKSPACE_ROOT` for testing), mirroring the spirit of Windows' "New Project" mode
+(`acbade0`), simplified: a single always-fixed root rather than a user-editable one persisted to a
+marker file after a first run (Windows' `workspace_root.txt` under `%LOCALAPPDATA%`). The composed path
+(`$WORKSPACE_ROOT/<name>`) then flows through the exact same real preflight validation and reuse/nest
+confirmation as before, unchanged.
+
+Added cheap, local name validation before ever composing a path or spawning a real preflight subprocess
+— mirrors Windows' `ValidateProjectName`, adapted to Linux filesystem rules (no NTFS-illegal characters
+or reserved device names to worry about here): empty name, a space (rejected with name-specific wording,
+e.g. "Try dashes or underscores instead" — avoids `validate_project_path`'s own composed-path message,
+which reads oddly when the user only typed a name, exactly Windows' stated reason for validating here
+first), a `/` (would silently create nested subfolders, breaking the flat-name model), and `.`/`..`
+(would resolve to the workspace root itself or its parent).
+
+Verified all three required scenarios again under the new flow, using `$WORKSPACE_ROOT` overridden to a
+disposable test directory so the tests never touch the user's real `~/owntech`: bad name (a space)
+rejected locally with the correct message, loops back to the name prompt; an existing complete clone
+under a given name shows the tailored reuse confirmation with the correctly composed path; a fresh name
+proceeds straight through with no confirmation dialog. Also directly verified the `/`, `.`, `..`, and
+whitespace-only rejection branches.
 
 ### Outstanding
 

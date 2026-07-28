@@ -7,12 +7,14 @@
 # out to the real script's --run-phase calls rather than reimplementing
 # its logic (validation rules included -- see below).
 #
-# Welcome screen, folder picker, real preflight validation, tailored
-# reuse/nest confirmation, a progress dialog wired to every real phase
-# (via --list-phases / --run-phase) with a Retry/Cancel dialog on fatal
-# failure, and a finish screen (open in VS Code, remaining manual steps).
-# See linux_installer_plan.md's GUI wizard section for the full design
-# and test results.
+# Welcome screen, then a project *name* (not a folder picker) -- every
+# project is created as a named subfolder of a fixed $HOME/owntech
+# workspace root, mirroring Windows' "New Project" mode (acbade0). Real
+# preflight validation, tailored reuse/nest confirmation, a progress
+# dialog wired to every real phase (via --list-phases / --run-phase) with
+# a Retry/Cancel dialog on fatal failure, and a finish screen (open in
+# VS Code, remaining manual steps). See linux_installer_plan.md's GUI
+# wizard section for the full design and test results.
 #
 # Usage:
 #   ./ownwizard.sh
@@ -23,6 +25,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_SCRIPT="${INSTALL_SCRIPT:-$SCRIPT_DIR/install_owntech.sh}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/owntech}"
 APP_TITLE="OwnWizard"
 
 if ! command -v zenity >/dev/null 2>&1; then
@@ -170,27 +173,57 @@ main() {
     # Welcome
     # ------------------------------------------------------------------------
     if ! zenity --info --title="$APP_TITLE" --width=420 --ok-label="Next" \
-        --text="This wizard installs everything needed to build and flash OwnTech Core firmware: git, CMake, VS Code (with the PlatformIO/CMake extensions), and a first PlatformIO build.\n\nClick Next to choose a project folder." \
+        --text="This wizard installs everything needed to build and flash OwnTech Core firmware: git, CMake, VS Code (with the PlatformIO/CMake extensions), and a first PlatformIO build.\n\nClick Next to name your project." \
         2>/dev/null
     then
         exit 0
     fi
 
     # ------------------------------------------------------------------------
-    # Folder picker + real preflight validation, looping back on failure
+    # Project name (not a folder picker) + real preflight validation,
+    # looping back on failure. Every project is created as a named
+    # subfolder of a fixed workspace root, mirroring Windows' "New Project"
+    # mode (acbade0) -- simplified here to a single always-fixed root
+    # rather than a user-editable, persisted-after-first-run one.
     # ------------------------------------------------------------------------
-    local default_project_path="$HOME/owntech"
     PROJECT_PATH=""
 
     while true; do
-        local chosen
-        chosen="$(zenity --file-selection --directory \
-            --title="Choose (or create) a project folder" \
-            --filename="$default_project_path/" 2>/dev/null)"
-        if [ -z "$chosen" ]; then
+        local project_name
+        project_name="$(zenity --entry --title="$APP_TITLE" --width=420 \
+            --text="New projects are created under $WORKSPACE_ROOT.\n\nProject name:" \
+            --entry-text="owntech-project" 2>/dev/null)"
+        if [ -z "$project_name" ]; then
             exit 0
         fi
-        chosen="${chosen%/}"
+        project_name="$(printf '%s' "$project_name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+        # Cheap, local name validation before ever composing a path or
+        # spawning a real preflight subprocess -- mirrors Windows'
+        # ValidateProjectName. Catching a space or '/' here with
+        # name-specific wording avoids validate_project_path's own
+        # composed-path message ("contains spaces"/etc.), which is correct
+        # but reads oddly here since the user only typed a name, not a path.
+        if [ -z "$project_name" ]; then
+            zenity --error --title="$APP_TITLE" --width=420 --text="Enter a name for this project." 2>/dev/null
+            continue
+        fi
+        if [[ "$project_name" == *" "* ]]; then
+            zenity --error --title="$APP_TITLE" --width=420 \
+                --text="Project name can't contain spaces. Try dashes or underscores instead, e.g. 'my-project'." \
+                2>/dev/null
+            continue
+        fi
+        if [[ "$project_name" == *"/"* ]]; then
+            zenity --error --title="$APP_TITLE" --width=420 --text="Project name can't contain '/'." 2>/dev/null
+            continue
+        fi
+        if [ "$project_name" = "." ] || [ "$project_name" = ".." ]; then
+            zenity --error --title="$APP_TITLE" --width=420 --text="\"$project_name\" isn't a valid project name." 2>/dev/null
+            continue
+        fi
+
+        local chosen="$WORKSPACE_ROOT/$project_name"
 
         local preflight_output preflight_exit
         preflight_output="$("$INSTALL_SCRIPT" --run-phase preflight --project-path "$chosen" --non-interactive 2>&1)"
