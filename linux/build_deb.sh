@@ -2,14 +2,16 @@
 #
 # Builds the owntech-installer .deb package.
 #
-# Assembles a build tree from linux/debian/ (packaging metadata) plus a
-# pinned copy of the installer scripts, then runs dpkg-deb --build on it.
+# Assembles a build tree from linux/debian/ (packaging metadata: DEBIAN/
+# control plus the .desktop entry that puts "OwnTech Environment Installer"
+# in the Applications menu) plus a pinned copy of the installer scripts
+# (install_owntech.sh, reset_environment.sh, owntech-installer-wizard.sh),
+# then runs dpkg-deb --build on it.
 #
-# The packaged copies of install_owntech.sh/reset_environment.sh are pinned
-# at build time (copied in below), not fetched live -- a given .deb build
-# stays reproducible; rebuild-and-republish is how script changes propagate.
-# Same rationale Windows uses for its own embedded script copy in
-# OwnTechInstaller.iss.
+# The packaged scripts are pinned at build time (copied in below), not
+# fetched live -- a given .deb build stays reproducible; rebuild-and-
+# republish is how script changes propagate. Same rationale Windows uses
+# for its own embedded script copy in OwnTechInstaller.iss.
 #
 # Usage:
 #   ./build_deb.sh
@@ -58,10 +60,11 @@ payload_dir="$build_dir/opt/owntech-installer"
 mkdir -p "$payload_dir"
 cp "$SCRIPT_DIR/install_owntech.sh" "$payload_dir/"
 cp "$SCRIPT_DIR/reset_environment.sh" "$payload_dir/"
+cp "$SCRIPT_DIR/owntech-installer-wizard.sh" "$payload_dir/"
 
 find "$build_dir" -type d -exec chmod 755 {} \;
 chmod 755 "$payload_dir"/*.sh
-chmod 644 "$build_dir/DEBIAN/control"
+chmod 644 "$build_dir/DEBIAN/control" "$build_dir/usr/share/applications/owntech-installer.desktop"
 
 dpkg-deb --build --root-owner-group "$build_dir" "$OUT_FILE"
 
