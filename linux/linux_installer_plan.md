@@ -10,10 +10,10 @@ against a real `ubuntu:24.04` Docker container (non-root user, passwordless sudo
 development loop" below). See "Implementation notes" at the end of this doc for what testing actually
 found and changed versus this plan's original design.
 
-GUI wizard (`.deb` + Zenity): implemented and tested end-to-end (including a real forced-failure
-retry/cancel run and a full genuine build through to `firmware.elf`/`firmware.bin`), except a literal
-human click-through of the Applications-menu launch on this real machine, which needs the user's `sudo`
-password and an actual mouse click — see "GUI wizard (.deb + Zenity)" below for design and full results.
+GUI wizard (`.deb` + Zenity): implemented and tested end-to-end, including a real forced-failure
+retry/cancel run, a full genuine build through to `firmware.elf`/`firmware.bin`, and a confirmed real
+install + Applications-menu launch on the user's own dev machine — see "GUI wizard (.deb + Zenity)"
+below for design and full results.
 
 ## Problem
 
@@ -409,9 +409,9 @@ anticipated when this doc was first written, same pattern Windows' own implement
 
 ## GUI wizard (`.deb` + Zenity)
 
-**Status: implemented and tested end-to-end**, except one item only the user can do (confirming the
-Applications-menu entry launches on this real machine — see "Outstanding" below). Packages
-`install_owntech.sh` as a GUI-installable `.deb` with a Zenity wizard front-end, mirroring
+**Status: implemented and tested end-to-end**, including a confirmed real install and Applications-menu
+launch on the user's own dev machine. Packages `install_owntech.sh` as a GUI-installable `.deb` with a
+Zenity wizard front-end, mirroring
 `wizard/OwnTechInstaller.iss` on Windows: a thin wrapper that shells out to the real script's
 `--run-phase`/`--list-phases` calls rather than reimplementing any of its logic (validation rules
 included). Confirmed with the user: Zenity (already on Ubuntu Desktop, no new runtime dependency),
@@ -498,11 +498,16 @@ pass (publishing is a separate later decision).
   (`Exec=/opt/owntech-installer/owntech-installer-wizard.sh`), `zenity` added to `Depends`. Verified in a
   fresh container: install pulls in `zenity` correctly, all three scripts plus the `.desktop` file land
   correctly, `desktop-file-validate` reports it valid, removal cleans up both the scripts and the
-  `.desktop` entry fully. **Outstanding**: confirming the entry actually appears in the Applications menu
-  and launches correctly from there on a real logged-in desktop session needs a real `sudo` password and
-  a literal mouse click on this machine — both outside what this agent can do non-interactively. Asked
-  the user to run `sudo apt install ./owntech-installer_<version>_all.deb` and try launching it from the
-  Applications menu themselves.
+  `.desktop` entry fully. **Confirmed on the real dev host** (this agent can't provide a `sudo` password
+  or click a real Applications menu, so the user ran the install and click-through themselves): `sudo apt
+  install ./owntech-installer_0.1.0_all.deb` set up `owntech-installer` cleanly, and "OwnTech Environment
+  Installer" appeared in the Applications menu and launched correctly from there. Side note from that real
+  install, unrelated to this package: pulling in `zenity`'s `libgtk-4-bin` dependency triggered dpkg to
+  process its full configuration queue, which surfaced a **pre-existing** broken `gnome-shell`/
+  `gnome-shell-common` state on that machine (dpkg: "a very bad inconsistent state... followup error from
+  a previous failure") — `owntech-installer` itself configured with no errors of its own; the
+  gnome-shell breakage predates this work and is unrelated to it (`sudo apt --fix-broken install` is the
+  general fix, left for the user to run deliberately rather than as a side effect of this session).
 - **Step 6 — forced-failure retry/cancel + safe removal**: forced a *real* failure (disabled apt's
   `sources.list.d` entry in a fresh container, with `curl` pre-installed so the failure surfaces at the
   `git` phase rather than preflight) and drove the wizard with a scripted zenity fake. Cancel: the real
@@ -521,8 +526,8 @@ pass (publishing is a separate later decision).
 
 ### Outstanding
 
-- A literal human click-through of the Applications-menu launch on this real machine (Step 5's last
-  piece) — needs the user's `sudo` password and an actual mouse click, neither available to this agent
-  non-interactively.
 - Publishing the `.deb` anywhere (a GitHub Release, a PPA, etc.) was explicitly out of scope for this
   pass, mirroring Windows' own deliberate deferral of wizard hosting — a separate decision for later.
+- The pre-existing `gnome-shell`/`gnome-shell-common` inconsistency on the real dev host (see Step 5
+  above) — unrelated to this work, left for the user to fix deliberately with `sudo apt --fix-broken
+  install` whenever convenient.
