@@ -1,0 +1,14 @@
+Package: owntech-installer
+Version: 0.1.0
+Section: devel
+Priority: optional
+Architecture: all
+Depends: bash
+Maintainer: OwnTech <noreply@owntech-foundation.org>
+Homepage: https://github.com/owntech-foundation/Core
+Description: OwnTech environment installer
+ Sets up the tools needed to build and flash OwnTech Core firmware:
+ git, CMake, VS Code (+ PlatformIO/CMake extensions), clones the Core
+ repo, and bootstraps/builds it once via PlatformIO. Thin wrapper
+ around the same install_owntech.sh script usable standalone from the
+ command line -- see /opt/owntech-installer/.
