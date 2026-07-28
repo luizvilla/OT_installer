@@ -64,6 +64,7 @@ cp "$SCRIPT_DIR/owntech-installer-wizard.sh" "$payload_dir/"
 
 find "$build_dir" -type d -exec chmod 755 {} \;
 chmod 755 "$payload_dir"/*.sh
+chmod 755 "$build_dir/DEBIAN/prerm"
 chmod 644 "$build_dir/DEBIAN/control" "$build_dir/usr/share/applications/owntech-installer.desktop"
 
 dpkg-deb --build --root-owner-group "$build_dir" "$OUT_FILE"

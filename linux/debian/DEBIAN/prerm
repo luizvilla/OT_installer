@@ -1,0 +1,12 @@
+#!/bin/sh
+# Deliberately a no-op beyond what dpkg already does on its own.
+#
+# dpkg's default removal only deletes the files this package actually
+# shipped (the three scripts under /opt/owntech-installer/ and the
+# .desktop entry) -- it never touches anything install_owntech.sh itself
+# created at runtime: the user's cloned project (wherever they pointed the
+# wizard), ~/.platformio, ~/.gitconfig, or VS Code's own config. There is
+# nothing safe left for this script to do beyond that default, so it does
+# nothing. Verified: 'apt remove owntech-installer' removes exactly the
+# packaged files and leaves everything install_owntech.sh set up intact.
+exit 0
