@@ -245,7 +245,48 @@ Recoverable-vs-fatal classification mirrors the Windows table:
 
 ## Testing plan (proposed, not yet executed)
 
-Mirrors Windows' test tooling, adapted:
+### Container-based development loop (primary iteration method)
+
+Unlike Windows — where the disposable "reset machine" had to be a real box or a VM — most of this
+script's phases have no hardware dependency at all, which makes a plain container the fast, safe,
+default way to iterate while writing `install_owntech.sh`, reserving a real machine/VM for the one
+phase that genuinely needs one. Confirmed workable on the dev machine this plan was written on:
+Docker is installed and the daemon is active there (`systemctl is-active docker` → `active`); the
+invoking user just needs to either prefix commands with `sudo docker ...` or be added to the
+`docker` group (`sudo usermod -aG docker $USER`, then a full log-out/log-in — the same "group change
+needs a real login, not just a new terminal" caveat as the `serial-permissions` phase's `dialout`
+change below, not a coincidence, both are Linux group-membership semantics).
+
+**Recipe:**
+
+1. Base image `ubuntu:24.04` — matches the plan's target distro exactly (not just "some Ubuntu").
+2. Inside the container, create a non-root user with passwordless sudo before running anything
+   (`useradd -m tester && usermod -aG sudo,dialout tester`), and run `install_owntech.sh` as that
+   user, not as root. This matters beyond realism: the script's design explicitly runs unprivileged
+   and elevates individual commands via `sudo`, not the whole process — testing as root would mask
+   bugs in that split, and VS Code's own CLI is known to behave differently (and worse) under root.
+3. Mount or `docker cp` the script in (`docker run --rm -it -v "$(pwd)":/opt/owntech ubuntu:24.04
+   bash`), then run phases one at a time via `--run-phase`, checking exit codes and the resulting
+   state file the same way `test_hardening.sh`'s per-phase-equivalence test will.
+4. Throw the container away (`--rm`) and start fresh for the next cycle, rather than relying on
+   `reset_environment.sh` to perfectly clean it — a disposable container already *is* the disposable
+   machine the Windows-side testing philosophy called for, just cheaper to obtain than a VM.
+
+**Coverage — what a container validates vs. doesn't:**
+
+| Phase | Container-testable? |
+|---|---|
+| `preflight`, `git`, `python`, `cmake`, `vscode`, `extensions`, `clone`, `bundle`, `bootstrap`, `build` | Yes — pure apt/CLI/network work, no hardware involved |
+| `serial-permissions` (dialout group, udev rules) | No — containers have no systemd/udev by default and no real USB device unless explicitly passed through (`--device=/dev/ttyACM0`), which defeats the point of a throwaway container |
+| Actually plugging in and uploading to the SPIN board | No — needs real hardware regardless, same as Windows |
+
+So a container covers everything through a real firmware build — the large majority of the script —
+and should be the default place bugs get found first. A real machine (or a VM with USB passthrough)
+is only strictly required for the `serial-permissions` phase and the final hardware-upload
+verification, mirroring how the Windows plan itself needed real hardware just for its own SPIN-board
+USB check.
+
+### Scripted test tooling (mirrors Windows' test tooling, adapted)
 
 - **`test_hardening.sh`** — equivalent of `test_hardening.ps1`: bad-path cases (space, excessive
   length, known-sync-folder path) invoked as real child-process calls asserting exit code 1 and the
@@ -254,16 +295,22 @@ Mirrors Windows' test tooling, adapted:
   `winget.cmd` shim technique, since real `apt-get` can't be pointed at a controllable local
   stand-in either); a per-phase-vs-full-run equivalence test, running all `--run-phase` values in
   order as separate processes and diffing the resulting state file against a normal full run's.
+  Designed to run inside the same disposable container described above — no hardware dependency.
 - **`reset_environment.sh`** — equivalent of `reset_environment.ps1`: `apt-get remove` the installed
   packages, delete `~/.platformio` (or the redirected core dir), VS Code config
   (`~/.config/Code`), `~/.gitconfig`, pip cache — for repeatable dry runs on a disposable test
-  machine. Same explicit warning as Windows: only for disposable test VMs, not a daily-driver
-  machine.
+  machine. Same explicit warning as Windows: only for disposable test VMs/containers, never a
+  daily-driver machine — `apt-get remove git`/`cmake` would happily remove tooling other software on
+  a real host actually depends on, unlike the Flatpak-style isolation VS Code itself happens to have.
+  Mainly useful for a real-machine/VM test pass; largely superseded by "just discard the container"
+  during container-based iteration.
 - **`run_timed_install_test.sh`** — equivalent of `run_timed_install_test.ps1`: chains reset → timed
   install, appends to a `install_timing_history.csv` for comparing install time across runs (e.g.
   bundle vs. no-bundle).
-- Real-machine test pass on at least one current Ubuntu LTS release before treating this as proven,
-  same bar Windows held itself to before building the wizard on top.
+- Real-machine (or VM with USB passthrough) test pass on at least one current Ubuntu LTS release,
+  specifically to exercise `serial-permissions` and actual board upload — the parts a container
+  can't reach — before treating this as proven, same bar Windows held itself to before building the
+  wizard on top.
 
 ## Open decisions
 
