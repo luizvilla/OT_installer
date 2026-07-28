@@ -10,8 +10,10 @@ against a real `ubuntu:24.04` Docker container (non-root user, passwordless sudo
 development loop" below). See "Implementation notes" at the end of this doc for what testing actually
 found and changed versus this plan's original design.
 
-GUI wizard (`.deb` + Zenity): in progress — see "GUI wizard (.deb + Zenity)" section below for design,
-status, and what testing has found so far.
+GUI wizard (`.deb` + Zenity): implemented and tested end-to-end (including a real forced-failure
+retry/cancel run and a full genuine build through to `firmware.elf`/`firmware.bin`), except a literal
+human click-through of the Applications-menu launch on this real machine, which needs the user's `sudo`
+password and an actual mouse click — see "GUI wizard (.deb + Zenity)" below for design and full results.
 
 ## Problem
 
@@ -407,22 +409,24 @@ anticipated when this doc was first written, same pattern Windows' own implement
 
 ## GUI wizard (`.deb` + Zenity)
 
-**Status: in progress.** Packages `install_owntech.sh` as a GUI-installable `.deb` with a Zenity wizard
-front-end, mirroring `wizard/OwnTechInstaller.iss` on Windows: a thin wrapper that shells out to the real
-script's `--run-phase`/`--list-phases` calls rather than reimplementing any of its logic (validation
-rules included). Confirmed with the user: Zenity (already on Ubuntu Desktop, no new runtime dependency),
+**Status: implemented and tested end-to-end**, except one item only the user can do (confirming the
+Applications-menu entry launches on this real machine — see "Outstanding" below). Packages
+`install_owntech.sh` as a GUI-installable `.deb` with a Zenity wizard front-end, mirroring
+`wizard/OwnTechInstaller.iss` on Windows: a thin wrapper that shells out to the real script's
+`--run-phase`/`--list-phases` calls rather than reimplementing any of its logic (validation rules
+included). Confirmed with the user: Zenity (already on Ubuntu Desktop, no new runtime dependency),
 Applications-menu launch (not auto-launch from `postinst` — reaching a logged-in user's display session
 from a root postinst is fragile and against Debian convention), local build/install/test only for this
-pass (publishing is a separate later decision). Full step-by-step plan lives in this session's plan file;
-summarized progress below.
+pass (publishing is a separate later decision).
 
 ### Design
 
-- New files live in `linux/`: `linux/debian/` (a `DEBIAN/control`-only tree so far; a `.desktop` entry
-  under `usr/share/applications/` lands with the desktop-integration step), `linux/build_deb.sh`
-  (assembles the payload and runs `dpkg-deb --build`), and `linux/owntech-installer-wizard.sh` (the
-  Zenity GUI). Package layout: `/opt/owntech-installer/{install_owntech.sh,reset_environment.sh}`,
-  `Depends: bash` (zenity added once the desktop entry ships), architecture `all`.
+- New files live in `linux/`: `linux/debian/` (`DEBIAN/control`, `DEBIAN/prerm`, and a `.desktop` entry
+  under `usr/share/applications/`), `linux/build_deb.sh` (assembles the payload and runs
+  `dpkg-deb --build`), and `linux/owntech-installer-wizard.sh` (the Zenity GUI). Package layout:
+  `/opt/owntech-installer/{install_owntech.sh,reset_environment.sh,owntech-installer-wizard.sh}`,
+  `usr/share/applications/owntech-installer.desktop` (`Exec=/opt/owntech-installer/
+  owntech-installer-wizard.sh`), `Depends: bash, zenity`, architecture `all`.
 - The packaged copies of the scripts are **pinned at build time** — `build_deb.sh` copies the live
   `linux/*.sh` files into the build tree at build time, not fetched live. A given `.deb` build stays
   reproducible; rebuild-and-republish is how script changes propagate. Same rationale as Windows pinning
@@ -445,34 +449,80 @@ summarized progress below.
   repeated (explanatory text before the `build` phase); `6bb4ddd`'s `code --disable-workspace-trust` is
   reused directly for the finish screen.
 
-### Build/test results so far
+### Build/test results
 
-- **Step 0 (fix confirmed real, not hypothetical)**: `phase_build`'s `"$pio_exe" run` call did *not*
-  export `PLATFORMIO_CORE_DIR` inline, unlike `phase_bootstrap`'s own call — `load_state()` sources
-  `CORE_DIR` as a plain, non-exported shell variable, so a redirected core dir would silently be lost the
-  moment `build` ran as its own `--run-phase` process (exactly the class of bug fixed on the Windows side
-  in `04d580e`). Verified with a fake `platformio` binary that reports what it saw in its own environment:
-  a negative control (reverting the fix) reproduced the failure (`PLATFORMIO_CORE_DIR=UNSET` in the
-  child, build reported failed) before confirming the fix resolves it. Fixed in `install_owntech.sh`.
-- **Step 1 (Debian packaging skeleton)**: `linux/debian/DEBIAN/control` + `linux/build_deb.sh` built and
+- **Step 0 — `PLATFORMIO_CORE_DIR` gap (fix confirmed real, not hypothetical)**: `phase_build`'s
+  `"$pio_exe" run` call did *not* export `PLATFORMIO_CORE_DIR` inline, unlike `phase_bootstrap`'s own
+  call — `load_state()` sources `CORE_DIR` as a plain, non-exported shell variable, so a redirected core
+  dir would silently be lost the moment `build` ran as its own `--run-phase` process (exactly the class
+  of bug fixed on the Windows side in `04d580e`). Verified with a fake `platformio` binary that reports
+  what it saw in its own environment: a negative control (reverting the fix) reproduced the failure
+  (`PLATFORMIO_CORE_DIR=UNSET` in the child, build reported failed) before confirming the fix resolves
+  it. Fixed in `install_owntech.sh`.
+- **Step 1 — Debian packaging skeleton**: `linux/debian/DEBIAN/control` + `linux/build_deb.sh` built and
   verified in a fresh `ubuntu:24.04` container — `apt install ./*.deb` lands both scripts executable at
   `/opt/owntech-installer/`, `apt remove owntech-installer` cleans up fully.
-- **Step 2 (standalone Zenity wizard)**: `linux/owntech-installer-wizard.sh` — welcome screen, folder
-  picker, real `--run-phase preflight` validation (loops back to the picker with the captured failure
-  text on a fatal error), tailored reuse/nest confirmation. Ends on a placeholder screen; progress-dialog
-  wiring is the next step. All three required scenarios (bad path, existing complete clone, fresh empty
+- **Step 2 — standalone Zenity wizard**: welcome screen, folder picker, real `--run-phase preflight`
+  validation (loops back to the picker with the captured failure text on a fatal error), tailored
+  reuse/nest confirmation. All three required scenarios (bad path, existing complete clone, fresh empty
   path) verified via a scripted `zenity` fake that drives the wizard's *real* control-flow logic
   deterministically (own zenity binary shadowed via `PATH`, canned responses per dialog type), plus a
-  real-display render check. **Non-obvious environment finding**: this dev machine's shell (a Snap-VS-Code
-  integrated terminal) inherits `GTK_PATH`/`GTK_EXE_PREFIX`/`GDK_PIXBUF_MODULE*`/`GSETTINGS_SCHEMA_DIR`/
-  `LOCPATH`/`GIO_MODULE_DIR`/`GTK_IM_MODULE_FILE`/`XDG_DATA_DIRS`/`LD_LIBRARY_PATH` env vars pointing at
-  the snap's bundled (incompatible) GTK libraries — launching `zenity` with those inherited causes a
-  `symbol lookup error` unrelated to the wizard itself. Unsetting them fixes it; a normal launch (e.g.
-  from the Applications menu once packaged) is unaffected. A true manual human click-through (not just
-  the scripted-fake logic verification) is still outstanding — the wizard was launched live on the real
-  desktop for this, but wasn't confirmed finished before this progress note was written.
-- **Steps 3–7 (progress dialog wiring, finish screen, desktop-entry integration, forced-failure
-  retry/cancel verification, and this doc's final write-up)**: not yet done as of this note. Step 3
-  (progress dialog wired to real phases via `--list-phases`/`--run-phase`, with a `zenity --question`
-  Retry/Cancel dialog on fatal failure reusing the captured `stop_install` text, plus explanatory text
-  before the `build` phase) was in progress when this note was written.
+  real-display render check, plus a live launch on the real desktop. **Non-obvious environment finding**:
+  this dev machine's shell (a Snap-VS-Code integrated terminal) inherits `GTK_PATH`/`GTK_EXE_PREFIX`/
+  `GDK_PIXBUF_MODULE*`/`GSETTINGS_SCHEMA_DIR`/`LOCPATH`/`GIO_MODULE_DIR`/`GTK_IM_MODULE_FILE`/
+  `XDG_DATA_DIRS`/`LD_LIBRARY_PATH` env vars pointing at the snap's bundled (incompatible) GTK libraries
+  — launching `zenity` with those inherited causes a `symbol lookup error` unrelated to the wizard
+  itself. Unsetting them fixes it; a normal launch (e.g. from the Applications menu once packaged) is
+  unaffected.
+- **Step 3 — progress dialog wired to real phases**: phases fetched live via `--list-phases` (never
+  hardcoded, unlike Windows' checklist, which hardcoded 9 rows despite `-ListPhases` being available
+  there too — this can't drift from `ALL_PHASES`). A persistent `zenity --progress` process is driven
+  through a file descriptor opened via process substitution rather than a one-shot pipe, so a
+  `zenity --question`
+  Retry/Cancel dialog can run concurrently on a fatal `--run-phase` failure with the progress dialog
+  still visible underneath; Retry re-invokes just that phase, Cancel explicitly kills the progress
+  dialog process (rather than leaving it stuck below 100%). Added explanatory text before the `build`
+  phase specifically — fixing the exact "looks frozen" gap Windows flagged but left open in `6f7fcb5`.
+  Verified against a fake install-script stub with configurable failure injection and a scripted zenity
+  fake: all-phases-succeed (correct percentage sequence), fail-then-retry, fail-then-cancel (confirmed
+  no lingering zenity process).
+- **Step 4 — finish dialog**: offers to open the repo in VS Code via `code --disable-workspace-trust`
+  (reused directly from the Windows wizard's `6bb4ddd`, already verified session-only/safe), then shows
+  the remaining manual steps (connect board, Build, Upload) reusing `phase_summary`'s own framing, plus
+  the dialout-group reminder when `serial-permissions` actually changed something. Reloads state
+  (`load_state`) rather than recomputing `REPO_PATH`/`GROUP_CHANGED` itself, so it always reflects what
+  `phase_clone`/`phase_serial_permissions` actually decided and persisted. Verified both branches (Open
+  in VS Code vs. Skip; with and without `GROUP_CHANGED`) against fake `zenity`/`code` binaries logging
+  their invocations.
+- **Step 5 — desktop-entry integration**: `linux/debian/usr/share/applications/owntech-installer.desktop`
+  (`Exec=/opt/owntech-installer/owntech-installer-wizard.sh`), `zenity` added to `Depends`. Verified in a
+  fresh container: install pulls in `zenity` correctly, all three scripts plus the `.desktop` file land
+  correctly, `desktop-file-validate` reports it valid, removal cleans up both the scripts and the
+  `.desktop` entry fully. **Outstanding**: confirming the entry actually appears in the Applications menu
+  and launches correctly from there on a real logged-in desktop session needs a real `sudo` password and
+  a literal mouse click on this machine — both outside what this agent can do non-interactively. Asked
+  the user to run `sudo apt install ./owntech-installer_<version>_all.deb` and try launching it from the
+  Applications menu themselves.
+- **Step 6 — forced-failure retry/cancel + safe removal**: forced a *real* failure (disabled apt's
+  `sources.list.d` entry in a fresh container, with `curl` pre-installed so the failure surfaces at the
+  `git` phase rather than preflight) and drove the wizard with a scripted zenity fake. Cancel: the real
+  captured failure reason ("Git install failed (apt-get) after retries...") displayed correctly, Cancel
+  aborted cleanly with no lingering zenity process and `git` correctly left uninstalled. Retry: the
+  fake's `--question` handler restored the apt sources (simulating the user fixing the real problem)
+  before returning Retry; the wizard re-ran just the `git` phase, which then succeeded, and — as a bonus
+  full end-to-end proof — every phase after it (`python` through `summary`, including a real `build`)
+  completed with no further prompts, producing genuine `firmware.elf`/`firmware.bin` and correctly adding
+  the test user to the `dialout` group. `DEBIAN/prerm` added as a deliberate, documented no-op (dpkg's
+  own removal already only deletes the files this package shipped, so there's nothing safer left to do)
+  — verified empirically: after seeding fake user data (`~/.platformio` with a fake `penv/bin/platformio`,
+  `~/.gitconfig`, `~/.config/Code`, a fake cloned project with its own `.git`), `apt remove
+  owntech-installer` removed exactly `/opt/owntech-installer/` and the `.desktop` entry, leaving every
+  piece of simulated user data untouched.
+
+### Outstanding
+
+- A literal human click-through of the Applications-menu launch on this real machine (Step 5's last
+  piece) — needs the user's `sudo` password and an actual mouse click, neither available to this agent
+  non-interactively.
+- Publishing the `.deb` anywhere (a GitHub Release, a PPA, etc.) was explicitly out of scope for this
+  pass, mirroring Windows' own deliberate deferral of wizard hosting — a separate decision for later.
