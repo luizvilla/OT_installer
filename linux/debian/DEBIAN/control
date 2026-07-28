@@ -1,4 +1,4 @@
-Package: owntech-installer
+Package: ownwizard
 Version: 0.1.0
 Section: devel
 Priority: optional
@@ -6,11 +6,10 @@ Architecture: all
 Depends: bash, zenity
 Maintainer: OwnTech <noreply@owntech-foundation.org>
 Homepage: https://github.com/owntech-foundation/Core
-Description: OwnTech environment installer
+Description: OwnWizard -- OwnTech environment installer
  Sets up the tools needed to build and flash OwnTech Core firmware:
  git, CMake, VS Code (+ PlatformIO/CMake extensions), clones the Core
- repo, and bootstraps/builds it once via PlatformIO. Installs a
- "OwnTech Environment Installer" entry in the Applications menu (a
- Zenity GUI wizard) plus the underlying install_owntech.sh/
- reset_environment.sh scripts, usable standalone from the command line
- -- see /opt/owntech-installer/.
+ repo, and bootstraps/builds it once via PlatformIO. Installs an
+ "OwnWizard" entry in the Applications menu (a Zenity GUI wizard) plus
+ the underlying install_owntech.sh/reset_environment.sh scripts,
+ usable standalone from the command line -- see /opt/ownwizard/.

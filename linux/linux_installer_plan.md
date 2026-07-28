@@ -10,10 +10,11 @@ against a real `ubuntu:24.04` Docker container (non-root user, passwordless sudo
 development loop" below). See "Implementation notes" at the end of this doc for what testing actually
 found and changed versus this plan's original design.
 
-GUI wizard (`.deb` + Zenity): implemented and tested end-to-end, including a real forced-failure
-retry/cancel run, a full genuine build through to `firmware.elf`/`firmware.bin`, and a confirmed real
-install + Applications-menu launch on the user's own dev machine — see "GUI wizard (.deb + Zenity)"
-below for design and full results.
+GUI wizard (`.deb` + Zenity, named **OwnWizard** — matching Windows' own `OwnTechInstaller` → `OwnWizard`
+rename): implemented and tested end-to-end, including a real forced-failure retry/cancel run, a full
+genuine build through to `firmware.elf`/`firmware.bin`, and a confirmed real install + Applications-menu
+launch on the user's own dev machine — see "GUI wizard (.deb + Zenity)" below for design and full
+results.
 
 ## Problem
 
@@ -407,12 +408,13 @@ anticipated when this doc was first written, same pattern Windows' own implement
   display/Xvfb workaround in the container — a real, unresolved-until-tested worry noted implicitly by
   the container-testing section above, resolved cleanly in practice.
 
-## GUI wizard (`.deb` + Zenity)
+## GUI wizard (`.deb` + Zenity) — OwnWizard
 
 **Status: implemented and tested end-to-end**, including a confirmed real install and Applications-menu
-launch on the user's own dev machine. Packages `install_owntech.sh` as a GUI-installable `.deb` with a
-Zenity wizard front-end, mirroring
-`wizard/OwnTechInstaller.iss` on Windows: a thin wrapper that shells out to the real script's
+launch on the user's own dev machine. Packages `install_owntech.sh` as a GUI-installable `.deb` named
+`ownwizard`, with a Zenity wizard front-end called **OwnWizard** (renamed from "OwnTech Environment
+Installer" to match Windows' `wizard/OwnTechInstaller.iss` → `wizard/OwnWizard.iss` rename in `acbade0`
+— see "Renamed to OwnWizard" below): a thin wrapper that shells out to the real script's
 `--run-phase`/`--list-phases` calls rather than reimplementing any of its logic (validation rules
 included). Confirmed with the user: Zenity (already on Ubuntu Desktop, no new runtime dependency),
 Applications-menu launch (not auto-launch from `postinst` — reaching a logged-in user's display session
@@ -423,10 +425,13 @@ pass (publishing is a separate later decision).
 
 - New files live in `linux/`: `linux/debian/` (`DEBIAN/control`, `DEBIAN/prerm`, and a `.desktop` entry
   under `usr/share/applications/`), `linux/build_deb.sh` (assembles the payload and runs
-  `dpkg-deb --build`), and `linux/owntech-installer-wizard.sh` (the Zenity GUI). Package layout:
-  `/opt/owntech-installer/{install_owntech.sh,reset_environment.sh,owntech-installer-wizard.sh}`,
-  `usr/share/applications/owntech-installer.desktop` (`Exec=/opt/owntech-installer/
-  owntech-installer-wizard.sh`), `Depends: bash, zenity`, architecture `all`.
+  `dpkg-deb --build`), and `linux/ownwizard.sh` (the Zenity GUI — renamed from
+  `owntech-installer-wizard.sh`, mirroring Windows' own `OwnTechInstaller.iss` → `OwnWizard.iss` rename;
+  `install_owntech.sh` itself keeps its name, exactly as Windows kept `install_owntech.ps1`'s name
+  unchanged). Package name `ownwizard`. Package layout:
+  `/opt/ownwizard/{install_owntech.sh,reset_environment.sh,ownwizard.sh}`,
+  `usr/share/applications/ownwizard.desktop` (`Name=OwnWizard`,
+  `Exec=/opt/ownwizard/ownwizard.sh`), `Depends: bash, zenity`, architecture `all`.
 - The packaged copies of the scripts are **pinned at build time** — `build_deb.sh` copies the live
   `linux/*.sh` files into the build tree at build time, not fetched live. A given `.deb` build stays
   reproducible; rebuild-and-republish is how script changes propagate. Same rationale as Windows pinning
@@ -461,7 +466,8 @@ pass (publishing is a separate later decision).
   it. Fixed in `install_owntech.sh`.
 - **Step 1 — Debian packaging skeleton**: `linux/debian/DEBIAN/control` + `linux/build_deb.sh` built and
   verified in a fresh `ubuntu:24.04` container — `apt install ./*.deb` lands both scripts executable at
-  `/opt/owntech-installer/`, `apt remove owntech-installer` cleans up fully.
+  `/opt/ownwizard/`, `apt remove ownwizard` cleans up fully. (Package/directory renamed to `ownwizard`
+  after the fact — see "Renamed to OwnWizard" below.)
 - **Step 2 — standalone Zenity wizard**: welcome screen, folder picker, real `--run-phase preflight`
   validation (loops back to the picker with the captured failure text on a fatal error), tailored
   reuse/nest confirmation. All three required scenarios (bad path, existing complete clone, fresh empty
@@ -523,6 +529,23 @@ pass (publishing is a separate later decision).
   `~/.gitconfig`, `~/.config/Code`, a fake cloned project with its own `.git`), `apt remove
   owntech-installer` removed exactly `/opt/owntech-installer/` and the `.desktop` entry, leaving every
   piece of simulated user data untouched.
+
+### Renamed to OwnWizard
+
+After the above was built and verified, the wizard was renamed to match Windows' own
+`OwnTechInstaller.iss` → `OwnWizard.iss` rename (`acbade0`): `linux/owntech-installer-wizard.sh` →
+`linux/ownwizard.sh`, the `.desktop` entry's `Name=`/filename, the `.deb` package name
+(`owntech-installer` → `ownwizard`), and the payload install directory (`/opt/owntech-installer` →
+`/opt/ownwizard`). `APP_TITLE` inside the wizard changed from "OwnTech Environment Installer" to
+"OwnWizard" accordingly. `install_owntech.sh`/`reset_environment.sh` keep their names and all internal
+identifiers unchanged (state dir `~/.local/state/owntech-installer/`, the `~/.profile` marker text) —
+same scoping as Windows, which didn't rename `install_owntech.ps1` either; only the GUI wizard's own
+name changed, not the backend script it wraps. Unlike the Windows rename, this pass didn't bring over
+that commit's other changes (New Project mode, hardcoded PlatformIO bundle URL, etc.) — naming only.
+Re-verified in a fresh container after the rename: install lands all three scripts at
+`/opt/ownwizard/{install_owntech.sh,reset_environment.sh,ownwizard.sh}` plus
+`/usr/share/applications/ownwizard.desktop` (valid per `desktop-file-validate`), `apt remove ownwizard`
+cleans up fully.
 
 ### Outstanding
 

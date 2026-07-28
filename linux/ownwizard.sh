@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
-# GUI wizard for the OwnTech environment installer -- a Zenity front-end
-# around install_owntech.sh, mirroring wizard/OwnTechInstaller.iss on
-# Windows: a thin wrapper that shells out to the real script's
-# --run-phase calls rather than reimplementing its logic (validation
-# rules included -- see below).
+# OwnWizard -- GUI wizard for the OwnTech environment installer, a Zenity
+# front-end around install_owntech.sh. Renamed from
+# owntech-installer-wizard.sh, mirroring wizard/OwnWizard.iss on Windows
+# (itself renamed from OwnTechInstaller.iss): a thin wrapper that shells
+# out to the real script's --run-phase calls rather than reimplementing
+# its logic (validation rules included -- see below).
 #
-# Standalone/development state (this commit): welcome screen, folder
-# picker, real preflight validation, tailored reuse/nest confirmation, a
-# progress dialog wired to every real phase (via --list-phases /
-# --run-phase) with a Retry/Cancel dialog on fatal failure, and a finish
-# screen (open in VS Code, remaining manual steps). Desktop-entry
-# packaging lands in a later commit -- see linux_installer_plan.md's GUI
-# wizard section.
+# Welcome screen, folder picker, real preflight validation, tailored
+# reuse/nest confirmation, a progress dialog wired to every real phase
+# (via --list-phases / --run-phase) with a Retry/Cancel dialog on fatal
+# failure, and a finish screen (open in VS Code, remaining manual steps).
+# See linux_installer_plan.md's GUI wizard section for the full design
+# and test results.
 #
 # Usage:
-#   ./owntech-installer-wizard.sh
+#   ./ownwizard.sh
 #
 # Needs a real desktop session (zenity opens real windows) -- not the
 # disposable Docker container used for install_owntech.sh's own testing.
@@ -23,7 +23,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_SCRIPT="${INSTALL_SCRIPT:-$SCRIPT_DIR/install_owntech.sh}"
-APP_TITLE="OwnTech Environment Installer"
+APP_TITLE="OwnWizard"
 
 if ! command -v zenity >/dev/null 2>&1; then
     echo "zenity is required to run this wizard. Install it with: sudo apt install zenity" >&2

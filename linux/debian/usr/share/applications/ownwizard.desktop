@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=OwnTech Environment Installer
+Name=OwnWizard
 Comment=Install the tools needed to build and flash OwnTech Core firmware
-Exec=/opt/owntech-installer/owntech-installer-wizard.sh
+Exec=/opt/ownwizard/ownwizard.sh
 Icon=system-software-install
 Terminal=false
 Categories=Development;
