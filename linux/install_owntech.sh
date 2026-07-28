@@ -25,6 +25,15 @@
 # install_owntech.ps1's $ErrorActionPreference = 'Continue'.
 set -uo pipefail
 
+# Forces apt to take its default answer for any package's debconf prompts
+# instead of trying (and, without a real terminal, failing) to ask
+# interactively. Confirmed via a real container run: even a plain 'apt-get
+# install curl' walks through several debconf frontends before falling back
+# to one that works, in ~4s of pure overhead -- a package that actually has a
+# yes/no or license prompt (unlike anything installed today) would otherwise
+# hang the whole script waiting for input that can never arrive.
+export DEBIAN_FRONTEND=noninteractive
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
@@ -95,7 +104,7 @@ ensure_curl() {
         stop_install "Could not run 'apt-get update' to install curl." \
             "Check your internet connection / apt sources, then re-run this script."
     fi
-    if ! retry "curl install (apt)" sudo apt-get install -y curl ca-certificates; then
+    if ! retry "curl install (apt)" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates; then
         stop_install "Could not install curl via apt." \
             "Try 'sudo apt-get install -y curl ca-certificates' manually, then re-run this script."
     fi
@@ -117,7 +126,7 @@ apt_install_verify() {
         stop_install "Could not run 'apt-get update' before installing $display_name." \
             "Check your internet connection / apt sources, then re-run this script."
     fi
-    if ! retry "$display_name install (apt)" sudo apt-get install -y "$pkg_name"; then
+    if ! retry "$display_name install (apt)" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg_name"; then
         stop_install "$display_name install failed (apt-get) after retries." \
             "Try running 'sudo apt-get install -y $pkg_name' manually to see the full error."
     fi
@@ -404,7 +413,7 @@ phase_python() {
         stop_install "Could not run 'apt-get update' before installing Python 3." \
             "Check your internet connection / apt sources, then re-run this script."
     fi
-    if ! retry "Python 3 install (apt)" sudo apt-get install -y python3 python3-venv python3-pip; then
+    if ! retry "Python 3 install (apt)" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip; then
         stop_install "Python 3 install failed (apt-get) after retries." \
             "Try 'sudo apt-get install -y python3 python3-venv python3-pip' manually to see the full error."
     fi
@@ -457,7 +466,7 @@ phase_vscode() {
     # apt (not dpkg) so its own dependencies get resolved. The official .deb's
     # postinst also registers Microsoft's apt repo, so 'apt upgrade' keeps VS
     # Code current afterward without this script doing anything further.
-    if ! retry "VS Code install (apt)" sudo apt-get install -y "$deb_path"; then
+    if ! retry "VS Code install (apt)" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb_path"; then
         rm -f "$deb_path"
         stop_install "VS Code .deb install failed (apt-get) after retries." \
             "Try 'sudo apt-get install -y $deb_path' manually to see the full error."
