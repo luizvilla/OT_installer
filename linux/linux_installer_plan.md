@@ -1,0 +1,301 @@
+# Plan — Linux Installer for OwnTech Environment Setup
+
+## Status
+
+Design doc only. No scripts under `linux/` exist yet. This mirrors how
+[`../windows_installer_plan.md`](../windows_installer_plan.md) itself preceded `install_owntech.ps1` —
+the plan comes first, then each phase gets implemented and hardened against a real machine.
+
+## Problem
+
+`../windows_installer_plan.md` automated Steps 1–6 of `docs/environment_setup.md` on Windows and
+explicitly called out Linux as a **non-goal for v1**: "different tooling and failure modes, separate
+effort if pursued later." That effort starts here. The underlying problem is the same one the Windows
+side identified — this is a reliability problem, not a communication one. A newcomer following the
+manual doc on Linux hits a different set of silent failure modes than on Windows (distro package
+manager quirks, USB serial permissions, `python3-venv` not being bundled with `python3`), but the shape
+of the problem — too many steps with silent failure modes before ever seeing a blinking LED — is
+identical.
+
+## Goals
+
+- Automate the same Steps 1–6 on Debian/Ubuntu: project folder, VS Code, PlatformIO extension,
+  cloning Core, and a first build.
+- Fail fast and specific, same philosophy as Windows: every phase validates its own outcome and
+  reports what went wrong and how to fix it.
+- Idempotent: safe to re-run on a machine that's already partially set up.
+- Also fix a Linux-specific failure mode Windows never had: USB-serial permissions for the SPIN
+  board, so users don't hit a silent "permission denied" the first time they try to upload.
+- Docs stay the detailed manual reference; this installer becomes the recommended fast path, same as
+  on Windows.
+
+## Non-goals (v1)
+
+- Distros other than Debian/Ubuntu (Fedora/RHEL via `dnf`, Arch via `pacman`, etc.) — different
+  package managers and failure modes, a separate effort if pursued later, exactly how Windows itself
+  scoped out Linux/macOS from its own v1.
+- Board upload itself (Steps 7–8) — hardware-dependent, stays manual, same as Windows. This plan does
+  fix the *permission* precondition for upload (see `serial-permissions` phase below), but not the
+  upload step itself.
+- A GUI wizard — start as a script only, same sequencing the Windows side used (`install_owntech.ps1`
+  was proven reliable via real-machine testing *before* `wizard/OwnTechInstaller.iss` was built on top
+  of it). Only invest in a GUI here if the plain-script UX turns out to actually matter to users.
+- Requiring the whole script to run as root. Individual commands that need privilege escalation
+  (`apt-get install`, `usermod -aG dialout`) go through `sudo` themselves; the script as a whole runs
+  as the invoking user, so cloned repos, VS Code extensions, and the PlatformIO venv stay owned by
+  that user rather than root.
+
+## Approach
+
+A Bash script, `install_owntech.sh`, driving `apt-get`, structured as discrete phases with explicit
+checks between them — the same shape as `install_owntech.ps1`, adapted to Linux tooling. Bash was
+chosen over Python specifically to avoid a chicken-and-egg problem: Python is one of the things this
+script installs, so the script itself can't depend on it being present yet. This mirrors and reuses
+the same phase/state/retry architecture Windows already proved out, rather than inventing a different
+structure for Linux.
+
+Rationale for `apt` over a universal method (curl-pipe-installers per tool, snap, etc.): it's the
+native, auditable package manager for the target distros, matches how `winget` was chosen on Windows
+(no bundled installer binaries to keep up to date, correct flags handled by the package manager
+itself), and every tool needed here (`git`, `python3`, `cmake`) has a standard Debian/Ubuntu package.
+VS Code is the one exception — it ships its own `.deb` rather than being in the default Ubuntu
+repositories, addressed in its own phase below.
+
+## Phases
+
+Each phase is independently invocable via `--run-phase <name>` (mirrors `-RunPhase` on Windows), so a
+future GUI wrapper — or a test harness — can drive one phase at a time and check its own exit code,
+without re-deriving Pascal-side validation logic. State is persisted across phase invocations (since
+each is a fresh process) to a flat file:
+
+```
+~/.local/state/owntech-installer/install_state_<md5-of-normalized-project-path>.env
+```
+
+This deliberately uses `KEY=value` shell-sourceable format, not JSON — bash has no built-in JSON
+parsing, and the state here (`PROJECT_PATH`, `REPO_PATH`, `CORE_DIR`, `INSTALLED_GIT`,
+`INSTALLED_PYTHON`, `INSTALLED_CMAKE`, `INSTALLED_CODE`) is flat enough that adding a `jq` dependency
+just to read/write it isn't worth it. Each phase `source`s the file at start and rewrites it at end,
+the same role `Get-InstallState`/`Save-InstallState` play on Windows. Kept outside the project folder
+(`~/.local/state`, XDG-style) for the same reason as Windows' `%LOCALAPPDATA%` choice: a state file
+living inside the project folder would make a fresh, empty folder look non-empty before anything is
+actually cloned into it.
+
+### Phase 0 — Preflight
+
+- Verify the distro: read `/etc/os-release`, check `ID` or `ID_LIKE` contains `debian` or `ubuntu`.
+  Fatal otherwise, with remediation pointing at this doc's non-goals (other distros not supported
+  yet).
+- Verify `apt-get` is on PATH (should always be true if the distro check passed, but check anyway —
+  same defensive style as Windows' `Test-WingetAvailable`).
+- Resolve the project path (flag, or prompt, or a `--non-interactive` default of `~/owntech`).
+- Validate the project path:
+  - No spaces — kept even though Linux handles spaces in paths fine at the shell level, because
+    PlatformIO/Zephyr's toolchain packaging has shown whitespace-path bugs that are toolchain-side,
+    not OS-side (Windows hit this via a spaced *username* under `%USERPROFILE%`; a spaced Linux path
+    would hit the same underlying PlatformIO/Zephyr bug).
+  - Not under a known cloud-sync folder — check for `Dropbox`, `Nextcloud`, `OneDrive` as path
+    substrings, **warn only, not fatal** (unlike Windows' fatal OneDrive check): Linux has no single
+    dominant sync client, so this is a softer, more speculative check than the Windows one.
+  - Path length — Linux path limits (4096 total, 255 per component) are far looser than Windows' 260
+    chars, so this becomes a warn-only sanity check at a much higher threshold, not a fatal gate.
+- Disk space via `df --output=avail -B1G <path>` (or equivalent), same 5GB minimum floor as Windows.
+- PlatformIO core-dir redirect logic: mostly moot on Linux (`$HOME` and the project path are usually
+  the same filesystem), but keep the same *shape* of check — if `df` on `$HOME`'s filesystem shows
+  under 8GB free and the project path resolves to a different filesystem, redirect
+  `PLATFORMIO_CORE_DIR` to `<project-path>/.platformio_core` and persist it (in the user's shell rc
+  file, e.g. append an export line to `~/.profile`, since Linux has no registry to write a durable
+  env var into the way Windows does).
+- Detect already-installed components: `command -v git`, `command -v python3` (+ `python3 --version`
+  matching `^Python 3`), `command -v cmake`, `command -v code`.
+- Create the project folder if missing.
+- Write the state file.
+
+### Phase 1a — `git`
+
+`sudo apt-get update && sudo apt-get install -y git`. Verify via `command -v git`. Fatal with
+remediation ("check your internet connection / apt sources, then re-run") if still missing after
+install.
+
+### Phase 1b — `python`
+
+`sudo apt-get install -y python3 python3-venv python3-pip`.
+
+**Real, Debian-specific gotcha worth its own explicit check, not just an apt install line**:
+`python3-venv` is a separate apt package, not pulled in automatically by plain `python3` on
+Ubuntu/Debian. Without it, `get-platformio.py`'s venv bootstrap (Phase 5b/`bootstrap`) doesn't fail
+loudly — it silently produces a broken venv missing `ensurepip`, and the failure only surfaces later,
+confusingly, inside the bootstrap phase. This is exactly the class of failure mode this whole project
+exists to catch (compare to Windows' Python-Store-alias-stub check in `Test-PythonReal`), so the
+`python` phase verifies `python3 -m venv --help` actually works (not just that `python3` is on PATH)
+before considering itself done, and if not, gives the specific remediation ("run `sudo apt-get install
+python3-venv`") rather than a generic failure.
+
+### Phase 1c — `cmake`
+
+`sudo apt-get install -y cmake`. Verify via `command -v cmake`.
+
+### Phase 2 — `vscode`
+
+Download the official `.deb` from `https://update.code.visualstudio.com/latest/linux-deb-x64/stable`,
+then `sudo apt install ./vscode.deb` (not `dpkg -i`, so apt resolves the `.deb`'s own dependencies).
+The official `.deb`'s postinst script registers Microsoft's apt repository automatically, so a later
+plain `apt upgrade` keeps VS Code current — simpler than manually importing the GPG key and apt source
+line by hand, and gets the same end state. Verify via `command -v code`.
+
+### Phase 3 — `extensions`
+
+Identical to Windows: `code --install-extension platformio.platformio-ide --force` (required, fatal if
+missing after install), then `shd101wyy.markdown-preview-enhanced` and `mhutchie.git-graph` (optional,
+warn-only, non-fatal). No `sudo` needed — extensions install into the user's own VS Code profile.
+
+### Phase 4 — `clone`
+
+Same logic as Windows' `Invoke-CloneCore`/`Get-RepoPath`:
+- If the project folder already has a `.git` dir, reuse it directly.
+- Else if the project folder is non-empty (and isn't our clone), clone into a `Core` subfolder instead
+  of colliding with existing contents.
+- Verify a complete clone via `git rev-parse HEAD` (not just `.git` presence) — auto-heal an
+  incomplete/corrupt clone (from an interrupted previous run) by removing and re-cloning, same as
+  Windows.
+- Verify the resulting branch is `main`; fatal with remediation otherwise.
+- Apply the same `.vscode/settings.json` patch disabling
+  `platformio-ide.autoRebuildAutocompleteIndex`, merging into any existing settings rather than
+  overwriting them.
+
+### Phase 5a — `bundle` (optional optimization)
+
+Same idea as Windows' `Invoke-BundleSeed`, but the artifact itself is Linux/x86_64-specific — a
+`platformio_core_linux_x64.tar.gz` of a populated `~/.platformio/{packages,platforms}`, built by a
+future `build_platformio_bundle.sh` maintainer tool. Architecture-specific because the toolchain
+binaries inside differ from the Windows bundle; the Windows bundle can't be reused here.
+
+Extraction uses plain `tar xzf` — no equivalent of the Windows `7za.exe` workaround is expected to be
+needed, since that whole detour existed because Windows Explorer's `Expand-Archive` plus Defender's
+on-access scanning made extraction dramatically slower than the archive's compression alone would
+predict. Linux has no on-access AV scanning by default and `tar`/`gzip` extraction of many small files
+is not known to have an analogous bottleneck; this should be confirmed once real timing data exists,
+but there's no a-priori reason to pre-build a workaround for a problem that may not occur.
+
+Same fallback behavior as Windows: if the bundle can't be fetched, verified (checksum), or extracted,
+skip it silently and let the `build` phase's normal `pio run` fetch everything from scratch.
+
+### Phase 5b — `bootstrap`
+
+Same `get-platformio.py` bootstrap script Windows uses (it's cross-platform already), run via
+`python3` instead of `python`, producing the same `<core dir>/penv` layout the VS Code PlatformIO
+extension itself expects — same rationale as Windows: a plain `pip install platformio` builds fine but
+doesn't produce that layout, so the extension doesn't recognize it as done and silently redoes the
+work.
+
+### Phase 5c — `build`
+
+Same `pio run` smoke-test build inside the cloned repo. Fatal, no retry, same "print last 25 lines of
+build output" behavior on failure.
+
+### Phase `serial-permissions` — new, no Windows analog
+
+Windows confirmed (on real hardware, `windows_installer_plan.md`, "SPIN board USB/upload path verified
+on real hardware") that no driver was needed at all for the SPIN board. Linux has a different, real
+failure mode instead: accessing a USB-serial device (typically `/dev/ttyACM0` or `/dev/ttyUSB0`)
+without root requires the invoking user's account to be a member of the `dialout` group (on
+Debian/Ubuntu); if the board exposes itself via an ST-Link/CMSIS-DAP-style debug probe, that
+conventionally also needs a udev rules file granting non-root access to that specific USB
+vendor/product ID.
+
+This phase:
+- Checks group membership (`groups "$USER"` or `id -nG`), and if `dialout` is missing, runs
+  `sudo usermod -aG dialout "$USER"`.
+- **Warns explicitly and loudly** that a group change via `usermod` does **not** take effect in the
+  current login session — the user must fully log out and back in (a new terminal is not enough,
+  unlike re-reading `PATH`), a genuinely different gotcha from anything Windows has, and one that
+  silently confuses users if unstated (they'll retry the upload in the same session, still fail, and
+  have no reason to suspect a logout is what's actually needed).
+- Leaves actual udev-rule installation as an open decision (see below) pending whether OwnTech ships
+  a rules file for the board's specific debug-probe hardware — installing a *generic* rules file here
+  without knowing the exact VID/PID would be guessing, not automating a known-good procedure.
+- Does not attempt the upload itself — same non-goal boundary as Windows' Steps 7–8.
+
+### Phase — `summary`
+
+Same content as Windows' Phase 6: total elapsed time, which components were pre-existing vs. installed
+by this run, project folder location, and remaining manual steps — connect the SPIN board via USB-C,
+Build (checkmark) then Upload (arrow) in VS Code — plus, if the `serial-permissions` phase changed
+group membership this run, a repeated reminder to log out and back in first.
+
+## Error-handling philosophy
+
+Identical in spirit to Windows' `Stop-Install`: a `stop_install "<reason>" "<remediation>"` bash
+function that prints both, then `exit 1`. Every fatal error carries a specific, actionable remediation
+string, not a generic failure. A `retry` helper (3 attempts, 2s/4s exponential backoff) wraps every
+`apt-get`, `git clone`, and `curl` network call — the same role `Invoke-WithRetry` plays on Windows.
+Recoverable-vs-fatal classification mirrors the Windows table:
+
+| Step | Recoverable? | On exhausted failure |
+|---|---|---|
+| `git`/`python`/`cmake`/`vscode` (apt/curl) | Retry w/ backoff | Fatal |
+| PlatformIO IDE extension | No retry | Fatal (required) |
+| Markdown Preview / Git Graph extensions | No retry | Warning only, continues |
+| Clone OwnTech Core | Retry w/ backoff + auto-heal incomplete clone | Fatal |
+| Fetch package bundle | Retry w/ backoff | Falls back gracefully (not fatal) |
+| Bootstrap PlatformIO Core | Download has retry; running it does not | Fatal |
+| Build firmware | No retry | Fatal (show last 25 log lines) |
+| `serial-permissions` group change | N/A (single `usermod` call) | Warn, non-fatal — board upload just won't work until fixed, but doesn't block the rest of setup |
+| Preflight checks | N/A — validation, not network calls | Fatal |
+
+## Testing plan (proposed, not yet executed)
+
+Mirrors Windows' test tooling, adapted:
+
+- **`test_hardening.sh`** — equivalent of `test_hardening.ps1`: bad-path cases (space, excessive
+  length, known-sync-folder path) invoked as real child-process calls asserting exit code 1 and the
+  expected reason string; a simulated network-outage test against the bundle-fetch retry path; an
+  apt-retry test using a stubbed `apt-get` shim ahead of the real one on PATH (mirrors the Windows
+  `winget.cmd` shim technique, since real `apt-get` can't be pointed at a controllable local
+  stand-in either); a per-phase-vs-full-run equivalence test, running all `--run-phase` values in
+  order as separate processes and diffing the resulting state file against a normal full run's.
+- **`reset_environment.sh`** — equivalent of `reset_environment.ps1`: `apt-get remove` the installed
+  packages, delete `~/.platformio` (or the redirected core dir), VS Code config
+  (`~/.config/Code`), `~/.gitconfig`, pip cache — for repeatable dry runs on a disposable test
+  machine. Same explicit warning as Windows: only for disposable test VMs, not a daily-driver
+  machine.
+- **`run_timed_install_test.sh`** — equivalent of `run_timed_install_test.ps1`: chains reset → timed
+  install, appends to a `install_timing_history.csv` for comparing install time across runs (e.g.
+  bundle vs. no-bundle).
+- Real-machine test pass on at least one current Ubuntu LTS release before treating this as proven,
+  same bar Windows held itself to before building the wizard on top.
+
+## Open decisions
+
+- Whether to ship a project-specific udev rules file for the SPIN board's debug probe as part of
+  `serial-permissions`, once the exact USB VID/PID is known — currently just warns and fixes group
+  membership.
+- Whether `sudo` credentials should be front-loaded with one `sudo -v` call at the start of a phase
+  that needs it (so the password prompt happens once, predictably, at phase start) vs. letting each
+  individual `sudo apt-get`/`sudo usermod` call prompt inline — a UX detail worth deciding once the
+  script is actually run interactively a few times, not before.
+- Whether Fedora/Arch support is worth pursuing after Debian/Ubuntu v1 is proven, and if so, whether
+  that becomes distro-detection branching in the same script or genuinely separate scripts per distro
+  family.
+- Whether this installer replaces Steps 1–6 in `environment_setup.md` outright for Linux users, or
+  the docs keep the manual steps with a "Quick install" callout, same open question Windows left
+  unresolved for itself.
+- GUI wizard — deferred per this session's decision; revisit only if the plain-script UX turns out to
+  matter to users, same bar Windows set for itself before building `wizard/OwnTechInstaller.iss`.
+
+## Related files (planned, not yet written)
+
+- `install_owntech.sh` — the installer itself, implementing the phases above. Not yet written.
+- `reset_environment.sh` — resets a disposable test machine to a clean state between test passes. Not
+  yet written.
+- `build_platformio_bundle.sh` — maintainer tool packaging a populated `~/.platformio` core dir's
+  `packages`/`platforms` into a Linux-specific `.tar.gz` bundle for release. Not yet written.
+- `run_timed_install_test.sh` — chains reset → timed install, logs to a CSV history. Not yet written.
+- `test_hardening.sh` — automated test suite for the phases above. Not yet written.
+
+## Implementation notes
+
+None yet — this section will fill in the same way `windows_installer_plan.md`'s did, with corrections
+discovered once real-machine testing starts (e.g. Windows' own switch from `pip install platformio` to
+`get-platformio.py` was discovered this way, not planned from the start). Expect this Linux plan to
+acquire its own such corrections once `install_owntech.sh` exists and gets tested for real.
