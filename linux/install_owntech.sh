@@ -693,7 +693,7 @@ phase_build() {
 
     local build_log
     build_log="$(mktemp)"
-    if ! (cd "$REPO_PATH" && "$pio_exe" run) > "$build_log" 2>&1; then
+    if ! (cd "$REPO_PATH" && PLATFORMIO_CORE_DIR="$CORE_DIR" "$pio_exe" run) > "$build_log" 2>&1; then
         printf '\n  \033[33mLast 25 lines of build output:\033[0m\n'
         tail -n 25 "$build_log"
         rm -f "$build_log"
