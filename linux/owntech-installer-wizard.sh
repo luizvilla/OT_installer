@@ -7,11 +7,12 @@
 # rules included -- see below).
 #
 # Standalone/development state (this commit): welcome screen, folder
-# picker, real preflight validation, tailored reuse/nest confirmation,
-# and a progress dialog wired to every real phase (via --list-phases /
-# --run-phase) with a Retry/Cancel dialog on fatal failure. The finish
-# screen (open in VS Code, remaining manual steps) lands in a later
-# commit -- see linux_installer_plan.md's GUI wizard section.
+# picker, real preflight validation, tailored reuse/nest confirmation, a
+# progress dialog wired to every real phase (via --list-phases /
+# --run-phase) with a Retry/Cancel dialog on fatal failure, and a finish
+# screen (open in VS Code, remaining manual steps). Desktop-entry
+# packaging lands in a later commit -- see linux_installer_plan.md's GUI
+# wizard section.
 #
 # Usage:
 #   ./owntech-installer-wizard.sh
@@ -134,6 +135,36 @@ run_install_with_progress() {
     return 0
 }
 
+# Reads PROJECT_PATH (global). Reloads state rather than recomputing
+# repo_path/GROUP_CHANGED itself -- REPO_PATH is whatever phase_clone
+# actually decided and persisted (accounts for the nested-subfolder case),
+# and GROUP_CHANGED reflects whether serial-permissions really changed
+# anything this run.
+show_finish_screen() {
+    load_state "$PROJECT_PATH"
+
+    if zenity --question --title="$APP_TITLE" --width=420 \
+        --ok-label="Open in VS Code" --cancel-label="Skip" \
+        --text="Setup complete for:\n$REPO_PATH\n\nOpen the project in VS Code now?" \
+        2>/dev/null
+    then
+        # --disable-workspace-trust: session-only, verified-safe flag
+        # reused directly from the Windows wizard's 6bb4ddd.
+        code --disable-workspace-trust "$REPO_PATH" >/dev/null 2>&1 &
+        disown
+    fi
+
+    local group_note=""
+    if [ "$GROUP_CHANGED" -eq 1 ]; then
+        group_note="\n\nReminder: you were just added to the 'dialout' group -- log out and back in before step 3 below will work."
+    fi
+
+    # Reuses phase_summary's own framing for the remaining manual steps.
+    zenity --info --title="$APP_TITLE" --width=460 \
+        --text="Remaining manual steps:\n\n1. Connect your SPIN board via USB-C (its PWR LED should light up).\n2. In VS Code, use the Build (check mark) icon in the status bar.\n3. Then Upload (arrow icon) to flash the board and see the LED blink.${group_note}" \
+        2>/dev/null
+}
+
 main() {
     # ------------------------------------------------------------------------
     # Welcome
@@ -201,11 +232,7 @@ main() {
     # Progress dialog wired to real phases
     # ------------------------------------------------------------------------
     if run_install_with_progress; then
-        # Placeholder for the finish screen (open in VS Code, remaining
-        # manual steps) -- lands in the next commit.
-        zenity --info --title="$APP_TITLE" --width=420 \
-            --text="Installation complete for:\n$PROJECT_PATH\n\n(Finish screen wiring comes next.)" \
-            2>/dev/null
+        show_finish_screen
     else
         zenity --error --title="$APP_TITLE" --width=420 \
             --text="Installation cancelled." 2>/dev/null
