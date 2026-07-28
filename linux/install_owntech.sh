@@ -807,6 +807,14 @@ Usage: $0 [options]
 EOF
 }
 
+# Guards the entire argument-parsing + phase-execution block so this file
+# can be safely 'source'd (e.g. by test_hardening.sh, to unit-test internal
+# functions like retry() directly) without an empty/absent "$@" triggering
+# a real install run as a side effect. Running it directly (the only way
+# it's ever actually used for a real install) is unaffected: BASH_SOURCE[0]
+# equals $0 exactly in that case, same as today.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --project-path) PROJECT_PATH="$2"; shift 2 ;;
@@ -884,3 +892,5 @@ phase_bootstrap
 phase_build
 phase_serial_permissions
 phase_summary
+
+fi # BASH_SOURCE guard
