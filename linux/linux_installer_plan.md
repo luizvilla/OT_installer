@@ -2,9 +2,13 @@
 
 ## Status
 
-Design doc only. No scripts under `linux/` exist yet. This mirrors how
-[`../windows_installer_plan.md`](../windows_installer_plan.md) itself preceded `install_owntech.ps1` —
-the plan comes first, then each phase gets implemented and hardened against a real machine.
+Implemented and tested. All five planned scripts exist under `linux/` (`install_owntech.sh`,
+`reset_environment.sh`, `test_hardening.sh`, `run_timed_install_test.sh`,
+`build_platformio_bundle.sh`) and every phase, plus a full end-to-end run, an idempotent re-run, a
+real reset+reinstall timed cycle, and a real bundle build/consume round-trip, have been verified
+against a real `ubuntu:24.04` Docker container (non-root user, passwordless sudo — see "Container-based
+development loop" below). See "Implementation notes" at the end of this doc for what testing actually
+found and changed versus this plan's original design.
 
 ## Problem
 
@@ -243,7 +247,7 @@ Recoverable-vs-fatal classification mirrors the Windows table:
 | `serial-permissions` group change | N/A (single `usermod` call) | Warn, non-fatal — board upload just won't work until fixed, but doesn't block the rest of setup |
 | Preflight checks | N/A — validation, not network calls | Fatal |
 
-## Testing plan (proposed, not yet executed)
+## Testing plan (executed — see "Implementation notes" for what it found)
 
 ### Container-based development loop (primary iteration method)
 
@@ -288,14 +292,18 @@ USB check.
 
 ### Scripted test tooling (mirrors Windows' test tooling, adapted)
 
-- **`test_hardening.sh`** — equivalent of `test_hardening.ps1`: bad-path cases (space, excessive
-  length, known-sync-folder path) invoked as real child-process calls asserting exit code 1 and the
-  expected reason string; a simulated network-outage test against the bundle-fetch retry path; an
-  apt-retry test using a stubbed `apt-get` shim ahead of the real one on PATH (mirrors the Windows
-  `winget.cmd` shim technique, since real `apt-get` can't be pointed at a controllable local
-  stand-in either); a per-phase-vs-full-run equivalence test, running all `--run-phase` values in
-  order as separate processes and diffing the resulting state file against a normal full run's.
-  Designed to run inside the same disposable container described above — no hardware dependency.
+- **`test_hardening.sh`** — equivalent of `test_hardening.ps1`, 4 groups, all passing (~40s total in
+  the test container). Two groups ended up implemented differently than originally proposed here, for
+  reasons worth recording: (2) `retry()`'s backoff/recovery is unit-tested directly against
+  controllable fake counter-based commands, by `source`-ing `install_owntech.sh` itself (see
+  "Implementation notes" — this required a `BASH_SOURCE` guard around the script's dispatch block, not
+  originally planned) — simpler and more deterministic than standing up a real HTTP server, while still
+  exercising the exact function every network call depends on. (3) apt-retry is tested against a real
+  `apt-get` and a package name guaranteed not to exist, rather than a PATH-based `apt-get` shim: since
+  `install_owntech.sh` invokes apt via `sudo`, a shim would need to survive `sudo`'s own `secure_path`
+  (which resolves `apt-get` itself, ignoring the caller's `PATH` where configured) — a real nonexistent
+  package sidesteps that entirely and is just as deterministic (it fails identically every attempt).
+  (1) bad-path cases and (4) per-phase-vs-full-run equivalence were implemented as originally planned.
 - **`reset_environment.sh`** — equivalent of `reset_environment.ps1`: `apt-get remove` the installed
   packages, delete `~/.platformio` (or the redirected core dir), VS Code config
   (`~/.config/Code`), `~/.gitconfig`, pip cache — for repeatable dry runs on a disposable test
@@ -330,19 +338,66 @@ USB check.
 - GUI wizard — deferred per this session's decision; revisit only if the plain-script UX turns out to
   matter to users, same bar Windows set for itself before building `wizard/OwnTechInstaller.iss`.
 
-## Related files (planned, not yet written)
+## Related files
 
-- `install_owntech.sh` — the installer itself, implementing the phases above. Not yet written.
-- `reset_environment.sh` — resets a disposable test machine to a clean state between test passes. Not
-  yet written.
-- `build_platformio_bundle.sh` — maintainer tool packaging a populated `~/.platformio` core dir's
-  `packages`/`platforms` into a Linux-specific `.tar.gz` bundle for release. Not yet written.
-- `run_timed_install_test.sh` — chains reset → timed install, logs to a CSV history. Not yet written.
-- `test_hardening.sh` — automated test suite for the phases above. Not yet written.
+- [`install_owntech.sh`](install_owntech.sh) — the installer, implementing all phases above (0–6 plus
+  `serial-permissions`). Reports per-phase elapsed time and a total install time, same as Windows.
+- [`reset_environment.sh`](reset_environment.sh) — resets a disposable test machine/container to a
+  clean state between test passes; supports `--include-python` and `--non-interactive`.
+- [`build_platformio_bundle.sh`](build_platformio_bundle.sh) — packages a populated PlatformIO core
+  dir's `packages`/`platforms` into a Linux/x86_64 `.tar.gz` for the `bundle` phase's `--bundle-url`.
+- [`run_timed_install_test.sh`](run_timed_install_test.sh) — chains reset → timed install, appends each
+  cycle's result to `install_timing_history.csv`.
+- [`test_hardening.sh`](test_hardening.sh) — automated test suite (4 groups, all passing).
 
 ## Implementation notes
 
-None yet — this section will fill in the same way `windows_installer_plan.md`'s did, with corrections
-discovered once real-machine testing starts (e.g. Windows' own switch from `pip install platformio` to
-`get-platformio.py` was discovered this way, not planned from the start). Expect this Linux plan to
-acquire its own such corrections once `install_owntech.sh` exists and gets tested for real.
+Real corrections found only by testing against an actual `ubuntu:24.04` container — none of these were
+anticipated when this doc was first written, same pattern Windows' own implementation notes describe
+(e.g. its `pip install platformio` → `get-platformio.py` switch):
+
+- **`python3 -m venv --help` does not test whether venv actually works — a real false positive, not a
+  hypothetical one.** It exits 0 unconditionally, because the `--help` text ships as part of core
+  `python3` regardless of whether the real implementation package (`python3.12-venv` on 24.04) is
+  installed. The actual Debian/Ubuntu failure ("ensurepip is not available") only appears when a real
+  venv is created. This silently passed on exactly the broken state the `python` phase exists to catch
+  — confirmed by deliberately removing `python3.12-venv` and watching the old check report success
+  anyway. Fixed with a `python3_venv_functional()` helper that creates a real venv in a temp dir and
+  checks `bin/pip` exists, then cleans up; wired into preflight detection, the `python` phase's
+  pre-check, and its post-install verification.
+- **`$USER` is not reliably set** — confirmed absent under `docker exec` (unlike a normal interactive
+  login shell), which under this script's `set -u` turned every reference in `serial-permissions` into
+  a hard crash the moment the phase ran. Fixed by using `id -un` instead, which works regardless of how
+  the process was started.
+- **Plain `apt-get remove` leaves orphaned dependencies behind.** `reset_environment.sh --include-python`
+  removing `python3-venv` (a thin meta-package) doesn't cascade to the versioned implementation package
+  (`python3.12-venv`) unless `--autoremove` is passed *and* that specific invocation is what actually
+  removes the meta-package — if it was already gone from an earlier reset, the versioned package is
+  left behind, orphaned but still fully functional, defeating the reset's purpose. Fixed by adding
+  `--autoremove` and also explicitly targeting the versioned package name (computed from the running
+  `python3`'s own version) rather than relying on the cascade alone.
+- **`sudo` doesn't forward the parent process's exported environment by default.** `DEBIAN_FRONTEND=
+  noninteractive` exported at the top of `install_owntech.sh` never reached the actual `apt-get`
+  processes running under `sudo` — confirmed via a real run, where a plain `apt-get install curl` cycled
+  through several debconf frontends (Dialog → Readline → Teletype) before falling back to one that
+  works. Harmless for every package this script installs today, but a package with a real yes/no or
+  license prompt would hang indefinitely waiting for input from a script that can never provide it.
+  Fixed by passing it explicitly per call site: `sudo env DEBIAN_FRONTEND=noninteractive apt-get ...`.
+- **A `BASH_SOURCE[0] == $0` guard, not originally planned, was needed to make `install_owntech.sh`
+  safely `source`-able** for `test_hardening.sh`'s unit-level `retry()` tests — without it, sourcing the
+  file to reach its internal functions also ran its entire bottom dispatch block against whatever `$@`
+  happened to be in the sourcing shell (empty, for `test_hardening.sh`), triggering a real full install
+  as a side effect. The guard itself was verified correct in isolation before this was traced to a much
+  more mundane cause during actual testing: the test container simply still had the pre-guard copy of
+  the script when first tested, so re-copying (not more debugging) fixed it.
+- **Real timing/size data, `ubuntu:24.04` test container**: a from-scratch `bootstrap`+`build` (toolchain
+  download + real Zephyr firmware build, producing genuine `firmware.elf`/`.bin`/`.mcuboot.bin`) took
+  2m 48s and left `~/.platformio` at 2.5 GB. A full reset→reinstall cycle via `run_timed_install_test.sh`
+  took 38s (reset) + 4m 40s (install). A `build_platformio_bundle.sh` tarball of that same 2.5 GB core dir
+  compressed to 0.50 GB, and round-tripped correctly end-to-end (built, downloaded via `curl file://`,
+  checksum-verified, extracted) with the restored `packages`/`platforms` matching the original exactly.
+  No `7za.exe`-equivalent workaround was needed for extraction speed, as anticipated in the Phase 5a
+  section above — plain `tar xzf` was never a bottleneck in testing.
+- Headless VS Code CLI operations (`code --install-extension`, `--list-extensions`) worked without any
+  display/Xvfb workaround in the container — a real, unresolved-until-tested worry noted implicitly by
+  the container-testing section above, resolved cleanly in practice.
