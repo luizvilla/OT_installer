@@ -697,14 +697,21 @@ phase_build() {
 phase_serial_permissions() {
     write_phase "Phase: USB serial permissions"
 
-    if id -nG "$USER" | tr ' ' '\n' | grep -qx dialout; then
-        write_ok "User '$USER' is already in the 'dialout' group."
+    # $USER isn't guaranteed to be set (confirmed via a real 'docker exec'
+    # test -- it's absent there, unlike a normal interactive login shell), so
+    # 'set -u' turns every reference into a hard failure. 'id -un' works
+    # unconditionally regardless of how the process was started.
+    local current_user
+    current_user="$(id -un)"
+
+    if id -nG "$current_user" | tr ' ' '\n' | grep -qx dialout; then
+        write_ok "User '$current_user' is already in the 'dialout' group."
         return 0
     fi
 
-    write_info "Adding '$USER' to the 'dialout' group (needed for USB-serial access to the SPIN board without root)..."
-    if ! sudo usermod -aG dialout "$USER"; then
-        write_warn "Could not add '$USER' to the 'dialout' group -- board upload may fail with a permission error until this is fixed manually ('sudo usermod -aG dialout $USER')."
+    write_info "Adding '$current_user' to the 'dialout' group (needed for USB-serial access to the SPIN board without root)..."
+    if ! sudo usermod -aG dialout "$current_user"; then
+        write_warn "Could not add '$current_user' to the 'dialout' group -- board upload may fail with a permission error until this is fixed manually ('sudo usermod -aG dialout $current_user')."
         return 0
     fi
 
@@ -713,7 +720,7 @@ phase_serial_permissions() {
     # only a full logout/login is. Silently confusing if unstated: the user
     # would retry the upload in the same session, still fail, and have no
     # reason to suspect a logout is what's actually needed.
-    write_warn "Added '$USER' to the 'dialout' group. This does NOT take effect in your current session -- log out and log back in (a new terminal is not enough) before trying to upload to the board."
+    write_warn "Added '$current_user' to the 'dialout' group. This does NOT take effect in your current session -- log out and log back in (a new terminal is not enough) before trying to upload to the board."
     GROUP_CHANGED=1
     save_state
 }
