@@ -351,7 +351,9 @@ USB check.
 - [`reset_environment.sh`](reset_environment.sh) — resets a disposable test machine/container to a
   clean state between test passes; supports `--include-python` and `--non-interactive`.
 - [`build_platformio_bundle.sh`](build_platformio_bundle.sh) — packages a populated PlatformIO core
-  dir's `packages`/`platforms` into a Linux/x86_64 `.tar.gz` for the `bundle` phase's `--bundle-url`.
+  dir's `packages`/`platforms` into a Linux/x86_64 `.tar.gz` for the `bundle` phase's `--bundle-url`. See
+  [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) for a verified license inventory of
+  everything this archives before (re-)publishing a bundle.
 - [`run_timed_install_test.sh`](run_timed_install_test.sh) — chains reset → timed install, appends each
   cycle's result to `install_timing_history.csv`.
 - [`test_hardening.sh`](test_hardening.sh) — automated test suite (4 groups, all passing).

@@ -16,6 +16,13 @@ or toolchain version. An install using a stale bundle still works correctly
 (pio run fetches whatever's missing or mismatched) -- it just won't save any
 download time for the parts that changed since the bundle was built.
 
+Before (re-)publishing, see THIRD_PARTY_LICENSES.md -- a license inventory of
+everything this script archives (toolchain, Zephyr framework, HAL modules,
+build tools), verified against a real populated core dir (on Linux, but the
+same PlatformIO package set applies here too). Two known gaps (tool-dtc,
+tool-gperf: GPL binaries with no bundled license text) are documented there;
+re-check it if platformio.ini/west.yml add a new dependency.
+
 Usage:
     .\build_platformio_bundle.ps1 -CoreDir D:\.platformio_core
     .\build_platformio_bundle.ps1 -CoreDir D:\.platformio_core -OutFile bundle.zip

@@ -29,6 +29,13 @@
 # won't save any download time for the parts that changed since the bundle
 # was built.
 #
+# Before (re-)publishing, see ../THIRD_PARTY_LICENSES.md -- a license
+# inventory of everything this script archives (toolchain, Zephyr framework,
+# HAL modules, build tools), verified against a real populated core dir. Two
+# known gaps (tool-dtc, tool-gperf: GPL binaries with no bundled license
+# text) are documented there; re-check it if platformio.ini/west.yml add a
+# new dependency.
+#
 # Usage:
 #   ./build_platformio_bundle.sh --core-dir ~/.platformio
 #   ./build_platformio_bundle.sh --core-dir ~/.platformio --out-file bundle.tar.gz
